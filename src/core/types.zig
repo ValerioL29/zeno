@@ -3,6 +3,8 @@
 //! Allocator: Does not allocate.
 
 const batch = @import("types/batch.zig");
+const checked_batch = @import("types/checked_batch.zig");
+const read_view = @import("types/read_view.zig");
 const scan = @import("types/scan.zig");
 const value_mod = @import("types/value.zig");
 
@@ -29,6 +31,12 @@ pub const Value = value_mod.Value;
 /// Public request type for plain-key batch writes.
 pub const PutWrite = batch.PutWrite;
 
+/// Public guarded batch request for official advanced atomic writes.
+pub const CheckedBatch = checked_batch.CheckedBatch;
+
+/// Public physical guard type for checked-batch execution.
+pub const CheckedBatchGuard = checked_batch.CheckedBatchGuard;
+
 /// Prefix or range bounds for ordered key scans.
 pub const KeyRange = scan.KeyRange;
 
@@ -43,3 +51,6 @@ pub const ScanCursor = scan.ScanCursor;
 
 /// Owned result container for one paginated scan page.
 pub const ScanPageResult = scan.ScanPageResult;
+
+/// Consistent read window handle for official advanced reads.
+pub const ReadView = read_view.ReadView;
