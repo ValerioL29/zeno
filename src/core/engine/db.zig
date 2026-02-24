@@ -3,6 +3,7 @@
 //! Allocator: Uses explicit allocators to own the engine handle and runtime state; semantic operations still return `error.NotImplemented`.
 
 const std = @import("std");
+const lifecycle = @import("lifecycle.zig");
 const runtime_state = @import("../runtime/state.zig");
 const types = @import("../types.zig");
 
@@ -25,8 +26,7 @@ pub const Database = struct {
     ///
     /// Thread Safety: Not thread-safe; caller must ensure exclusive ownership of the engine handle.
     pub fn close(self: *Database) void {
-        self.state.deinit();
-        self.allocator.destroy(self);
+        lifecycle.close(self);
     }
 
     /// Writes a consistent checkpoint of engine-owned state.
@@ -35,8 +35,7 @@ pub const Database = struct {
     ///
     /// Allocator: Does not allocate in the step 3 skeleton; returns `error.NotImplemented`.
     pub fn checkpoint(self: *Database) EngineError!void {
-        _ = self;
-        return error.NotImplemented;
+        return lifecycle.checkpoint(self);
     }
 
     /// Reads one key from the engine contract surface.
@@ -163,14 +162,7 @@ pub const Database = struct {
 ///
 /// Allocator: Does not allocate in the step 3 skeleton; returns `error.NotImplemented`.
 pub fn create(allocator: std.mem.Allocator) EngineError!*Database {
-    const db = allocator.create(Database) catch return error.OutOfMemory;
-    errdefer allocator.destroy(db);
-
-    db.* = .{
-        .allocator = allocator,
-        .state = runtime_state.DatabaseState.init(allocator, null),
-    };
-    return db;
+    return lifecycle.create(allocator);
 }
 
 /// Opens an engine handle from the provided runtime options.
@@ -179,9 +171,7 @@ pub fn create(allocator: std.mem.Allocator) EngineError!*Database {
 ///
 /// Allocator: Allocates the engine handle from `allocator` when persistence is not requested.
 pub fn open(allocator: std.mem.Allocator, options: types.DatabaseOptions) EngineError!*Database {
-    if (options.wal_path != null) return error.NotImplemented;
-    if (options.snapshot_path != null) return error.NotImplemented;
-    return create(allocator);
+    return lifecycle.open(allocator, options);
 }
 
 test "create initializes runtime-owned database state" {

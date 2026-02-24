@@ -5,6 +5,7 @@
 const std = @import("std");
 const runtime_shard = @import("shard.zig");
 const runtime_visibility = @import("visibility.zig");
+const storage_wal = @import("../storage/wal.zig");
 
 /// Number of shards in the runtime execution state.
 pub const NUM_SHARDS: usize = 64;
@@ -32,6 +33,7 @@ pub const RuntimeCounters = struct {
 pub const DatabaseState = struct {
     base_allocator: std.mem.Allocator,
     visibility_gate: runtime_visibility.VisibilityGate,
+    wal: ?storage_wal.Wal = null,
     snapshot_path: ?[]const u8 = null,
     shards: [NUM_SHARDS]runtime_shard.Shard,
     counters: RuntimeCounters,
@@ -47,6 +49,7 @@ pub const DatabaseState = struct {
         var state = DatabaseState{
             .base_allocator = base_allocator,
             .visibility_gate = .{},
+            .wal = null,
             .snapshot_path = snapshot_path,
             .shards = undefined,
             .counters = RuntimeCounters.init(),
@@ -65,6 +68,7 @@ pub const DatabaseState = struct {
     ///
     /// Thread Safety: Not thread-safe; caller must ensure exclusive ownership of the enclosing engine handle.
     pub fn deinit(self: *DatabaseState) void {
+        if (self.wal) |*wal| wal.close();
         for (&self.shards) |*shard| {
             shard.deinit();
         }

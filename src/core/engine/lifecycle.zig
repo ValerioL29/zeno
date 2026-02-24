@@ -1,3 +1,117 @@
 //! Lifecycle ownership boundary for engine open, create, close, and checkpoint work.
-//! Cost: O(1) module load only in step 3.
-//! Allocator: Does not allocate in step 3.
+//! Cost: O(s) for runtime-state setup and teardown, where `s` is the shard count.
+//! Allocator: Uses explicit allocators for engine-handle ownership; storage I/O remains unimplemented in step 5.
+
+const std = @import("std");
+const engine_db = @import("db.zig");
+const runtime_state = @import("../runtime/state.zig");
+const storage_replay = @import("../storage/replay.zig");
+const storage_snapshot = @import("../storage/snapshot.zig");
+const storage_wal = @import("../storage/wal.zig");
+const types = @import("../types.zig");
+
+/// Creates an in-memory engine handle without persistence.
+///
+/// Time Complexity: O(s), where `s` is the runtime shard count.
+///
+/// Allocator: Allocates the engine handle from `allocator`.
+pub fn create(allocator: std.mem.Allocator) engine_db.EngineError!*engine_db.Database {
+    const db = allocator.create(engine_db.Database) catch return error.OutOfMemory;
+    errdefer allocator.destroy(db);
+
+    db.* = .{
+        .allocator = allocator,
+        .state = runtime_state.DatabaseState.init(allocator, null),
+    };
+    return db;
+}
+
+/// Opens an engine handle and routes persistence work through storage-owned modules.
+///
+/// Time Complexity: O(s) when no persistence is requested, where `s` is the runtime shard count.
+///
+/// Allocator: Allocates the engine handle from `allocator`; storage-owned persistence remains unimplemented in step 5.
+pub fn open(allocator: std.mem.Allocator, options: types.DatabaseOptions) engine_db.EngineError!*engine_db.Database {
+    var db = try create(allocator);
+    errdefer db.close();
+    db.state.snapshot_path = options.snapshot_path;
+
+    if (options.snapshot_path) |snapshot_path| {
+        _ = storage_snapshot.load(&db.state, allocator, snapshot_path) catch return error.NotImplemented;
+    }
+
+    if (options.wal_path) |wal_path| {
+        const replay_applier = storage_replay.build_replay_applier(db, .{
+            .put = replay_put,
+            .delete = replay_delete,
+            .expire = replay_expire,
+            .prune_shard = replay_prune_shard,
+        });
+        db.state.wal = storage_wal.open(wal_path, .{
+            .fsync_mode = options.fsync_mode,
+            .fsync_interval_ms = options.fsync_interval_ms,
+            .min_lsn = 0,
+        }, replay_applier, allocator) catch return error.NotImplemented;
+    }
+
+    return db;
+}
+
+/// Flushes and closes persistence handles, then releases runtime state and engine ownership.
+///
+/// Time Complexity: O(s), where `s` is the runtime shard count.
+///
+/// Allocator: Does not allocate.
+///
+/// Thread Safety: Not thread-safe; caller must ensure exclusive ownership of the engine handle.
+pub fn close(db: *engine_db.Database) void {
+    db.state.deinit();
+    db.allocator.destroy(db);
+}
+
+/// Writes one consistent checkpoint through the storage-owned snapshot boundary.
+///
+/// Time Complexity: O(1) in the step 5 skeleton.
+///
+/// Allocator: Does not allocate in the step 5 skeleton; returns `error.NotImplemented` when snapshot persistence is requested.
+pub fn checkpoint(db: *engine_db.Database) engine_db.EngineError!void {
+    const snapshot_path = db.state.snapshot_path orelse return error.NotImplemented;
+    _ = storage_snapshot.write(&db.state, db.allocator, snapshot_path, 0) catch return error.NotImplemented;
+}
+
+fn replay_put(ctx: *anyopaque, key: []const u8, value: *const @import("../types/value.zig").Value) !void {
+    _ = ctx;
+    _ = key;
+    _ = value;
+    return error.NotImplemented;
+}
+
+fn replay_delete(ctx: *anyopaque, key: []const u8) !void {
+    _ = ctx;
+    _ = key;
+    return error.NotImplemented;
+}
+
+fn replay_expire(ctx: *anyopaque, key: []const u8, expire_at_sec: i64) !void {
+    _ = ctx;
+    _ = key;
+    _ = expire_at_sec;
+    return error.NotImplemented;
+}
+
+fn replay_prune_shard(ctx: *anyopaque, shard_idx: u8, prefix: []const u8) !void {
+    _ = ctx;
+    _ = shard_idx;
+    _ = prefix;
+    return error.NotImplemented;
+}
+
+test "create initializes runtime state without storage handles" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer close(db);
+
+    try testing.expect(db.state.wal == null);
+    try testing.expect(db.state.snapshot_path == null);
+}

@@ -6,14 +6,11 @@ const batch = @import("types/batch.zig");
 const checked_batch = @import("types/checked_batch.zig");
 const read_view = @import("types/read_view.zig");
 const scan = @import("types/scan.zig");
+const storage_wal = @import("storage/wal.zig");
 const value_mod = @import("types/value.zig");
 
 /// Durability policy for WAL fsync behavior.
-pub const FsyncMode = enum {
-    always,
-    none,
-    batched_async,
-};
+pub const FsyncMode = storage_wal.FsyncMode;
 
 /// Options for opening a database with WAL and optional snapshot support.
 pub const DatabaseOptions = struct {
