@@ -1,24 +1,32 @@
 //! Engine coordination center for the zeno-core facade skeleton.
-//! Cost: O(1) dispatch only in step 3.
-//! Allocator: Does not allocate in step 3; all operations return `error.NotImplemented`.
+//! Cost: O(1) dispatch plus O(s) runtime-state setup and teardown, where `s` is the shard count.
+//! Allocator: Uses explicit allocators to own the engine handle and runtime state; semantic operations still return `error.NotImplemented`.
 
 const std = @import("std");
+const runtime_state = @import("../runtime/state.zig");
 const types = @import("../types.zig");
 
 /// Shared error set for the step 3 engine skeleton.
 pub const EngineError = error{
     NotImplemented,
+    OutOfMemory,
 };
 
 /// Central engine handle coordinated by the future engine layer.
 pub const Database = struct {
+    allocator: std.mem.Allocator,
+    state: runtime_state.DatabaseState,
+
     /// Flushes and closes engine-owned resources.
     ///
-    /// Time Complexity: O(1) in the step 3 skeleton.
+    /// Time Complexity: O(s), where `s` is the runtime shard count.
     ///
     /// Allocator: Does not allocate.
+    ///
+    /// Thread Safety: Not thread-safe; caller must ensure exclusive ownership of the engine handle.
     pub fn close(self: *Database) void {
-        _ = self;
+        self.state.deinit();
+        self.allocator.destroy(self);
     }
 
     /// Writes a consistent checkpoint of engine-owned state.
@@ -155,19 +163,35 @@ pub const Database = struct {
 ///
 /// Allocator: Does not allocate in the step 3 skeleton; returns `error.NotImplemented`.
 pub fn create(allocator: std.mem.Allocator) EngineError!*Database {
-    _ = allocator;
-    return error.NotImplemented;
+    const db = allocator.create(Database) catch return error.OutOfMemory;
+    errdefer allocator.destroy(db);
+
+    db.* = .{
+        .allocator = allocator,
+        .state = runtime_state.DatabaseState.init(allocator, null),
+    };
+    return db;
 }
 
 /// Opens an engine handle from the provided runtime options.
 ///
-/// Time Complexity: O(1) in the step 3 skeleton.
+/// Time Complexity: O(s), where `s` is the runtime shard count, when persistence is not requested.
 ///
-/// Allocator: Does not allocate in the step 3 skeleton; returns `error.NotImplemented`.
+/// Allocator: Allocates the engine handle from `allocator` when persistence is not requested.
 pub fn open(allocator: std.mem.Allocator, options: types.DatabaseOptions) EngineError!*Database {
-    _ = allocator;
-    _ = options;
-    return error.NotImplemented;
+    if (options.wal_path != null) return error.NotImplemented;
+    if (options.snapshot_path != null) return error.NotImplemented;
+    return create(allocator);
+}
+
+test "create initializes runtime-owned database state" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close();
+
+    try testing.expectEqual(@as(usize, runtime_state.NUM_SHARDS), db.state.shards.len);
+    try testing.expect(db.state.snapshot_path == null);
 }
 
 /// Scans the next prefix page inside a consistent read view.
