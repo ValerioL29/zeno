@@ -3,14 +3,11 @@
 //! Allocator: Does not allocate in the skeleton; `open` returns `error.NotImplemented`.
 
 const std = @import("std");
+const codec = @import("../internal/codec.zig");
 const Value = @import("../types/value.zig").Value;
 
 /// Durability policy for WAL fsync behavior.
-pub const FsyncMode = enum {
-    always,
-    none,
-    batched_async,
-};
+pub const FsyncMode = enum { always, none, batched_async };
 
 /// WAL open/runtime configuration with replay floor and fsync policy.
 pub const WalOptions = struct {
@@ -18,6 +15,15 @@ pub const WalOptions = struct {
     fsync_interval_ms: u32 = 2,
     min_lsn: u64 = 0,
 };
+
+/// Maximum nesting depth allowed in durability payload encoding.
+pub const MAX_DEPTH: usize = codec.MAX_DEPTH;
+
+/// Maximum accepted key length for durability records.
+pub const MAX_KEY_LEN: u32 = codec.MAX_KEY_LEN;
+
+/// Maximum accepted serialized value size for durability records.
+pub const MAX_VAL_LEN: u32 = codec.MAX_VAL_LEN;
 
 /// Replay callback table used by WAL recovery.
 pub const ReplayApplier = struct {
