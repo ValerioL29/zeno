@@ -3,6 +3,8 @@
 //! Allocator: Uses explicit allocators to own the engine handle, runtime state, and caller-visible cloned values.
 
 const std = @import("std");
+const batch_ops = @import("batch.zig");
+const internal_codec = @import("../internal/codec.zig");
 const lifecycle = @import("lifecycle.zig");
 const read = @import("read.zig");
 const runtime_state = @import("../runtime/state.zig");
@@ -15,6 +17,9 @@ pub const EngineError = error{
     OutOfMemory,
     KeyTooLarge,
     ActiveReadViews,
+    ValueTooLarge,
+    ValueTooDeep,
+    GuardFailed,
 };
 
 /// Central engine handle coordinated by the future engine layer.
@@ -140,13 +145,15 @@ pub const Database = struct {
 
     /// Applies one plain atomic batch.
     ///
-    /// Time Complexity: O(1) until batch execution is implemented.
+    /// Time Complexity: O(n + b + v), where `n` is `writes.len`, `b` is total serialized value bytes measured during planning, and `v` is total cloned value size for prepared writes.
     ///
-    /// Allocator: Does not allocate; returns `error.NotImplemented` until batch execution is implemented.
+    /// Allocator: Uses the engine base allocator for committed values and temporary planner scratch while validating and preparing the batch.
+    ///
+    /// Ownership: Clones all surviving write values into engine-owned storage before making the batch visible.
+    ///
+    /// Thread Safety: Safe for concurrent use with point operations and read views; acquires the global visibility gate exclusively for the full apply window.
     pub fn apply_batch(self: *Database, writes: []const types.PutWrite) EngineError!void {
-        _ = self;
-        _ = writes;
-        return error.NotImplemented;
+        return batch_ops.apply_batch(&self.state, self.allocator, writes);
     }
 
     /// Opens one consistent read view.
@@ -255,7 +262,7 @@ test "read view copies release the visibility gate only once" {
     const testing = std.testing;
 
     const db = try create(testing.allocator);
-    defer db.close();
+    defer db.close() catch unreachable;
 
     var view = try db.read_view();
     var copied = view;
@@ -282,6 +289,90 @@ test "close fails while a read view is still active" {
     defer view.deinit();
 
     try testing.expectError(error.ActiveReadViews, db.close());
+}
+
+test "apply_batch keeps the final value in declared key order" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const one = types.Value{ .integer = 1 };
+    const two = types.Value{ .integer = 2 };
+    const three = types.Value{ .integer = 3 };
+
+    try db.apply_batch(&.{
+        .{ .key = "alpha", .value = &one },
+        .{ .key = "beta", .value = &two },
+        .{ .key = "alpha", .value = &three },
+    });
+
+    var alpha = (try db.get(testing.allocator, "alpha")).?;
+    defer alpha.deinit(testing.allocator);
+    var beta = (try db.get(testing.allocator, "beta")).?;
+    defer beta.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i64, 3), alpha.integer);
+    try testing.expectEqual(@as(i64, 2), beta.integer);
+}
+
+test "apply_checked_batch keeps state unchanged when a guard fails" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const original = types.Value{ .string = "original" };
+    try db.put("guarded", &original);
+
+    const replacement = types.Value{ .string = "replacement" };
+    const other = types.Value{ .integer = 9 };
+
+    try testing.expectError(error.GuardFailed, apply_checked_batch(db, .{
+        .writes = &.{
+            .{ .key = "guarded", .value = &replacement },
+            .{ .key = "other", .value = &other },
+        },
+        .guards = &.{
+            .{ .key_not_exists = "guarded" },
+        },
+    }));
+
+    var guarded = (try db.get(testing.allocator, "guarded")).?;
+    defer guarded.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("original", guarded.string);
+    try testing.expect((try db.get(testing.allocator, "other")) == null);
+}
+
+test "apply_checked_batch validates guard keys and expected values" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    try testing.expectError(error.KeyTooLarge, apply_checked_batch(db, .{
+        .writes = &.{},
+        .guards = &.{
+            .{ .key_exists = "" },
+        },
+    }));
+
+    const oversized_bytes = try allocator.alloc(u8, @as(usize, @intCast(internal_codec.MAX_VAL_LEN)) + 1);
+    defer allocator.free(oversized_bytes);
+    @memset(oversized_bytes, 'x');
+    const oversized_value = types.Value{ .string = oversized_bytes };
+
+    try testing.expectError(error.ValueTooLarge, apply_checked_batch(db, .{
+        .writes = &.{},
+        .guards = &.{
+            .{ .key_value_equals = .{
+                .key = "guarded",
+                .value = &oversized_value,
+            } },
+        },
+    }));
 }
 
 /// Scans the next prefix page inside a consistent read view.
@@ -330,11 +421,13 @@ pub fn scan_range_from_in_view(
 
 /// Applies one checked batch under the official advanced contract.
 ///
-/// Time Complexity: O(1) until checked-batch execution is implemented.
+/// Time Complexity: O(g + n + b + v), where `g` is `batch.guards.len`, `n` is surviving write count, `b` is total serialized value bytes measured during planning, and `v` is total cloned value size for prepared writes.
 ///
-/// Allocator: Does not allocate; returns `error.NotImplemented` until checked-batch execution is implemented.
+/// Allocator: Uses the engine base allocator for committed values and temporary planner scratch while validating guards and preparing the batch.
+///
+/// Ownership: Clones all surviving write values into engine-owned storage before making the batch visible.
+///
+/// Thread Safety: Safe for concurrent use with point operations and read views; acquires the global visibility gate exclusively for the full guard-check and apply window.
 pub fn apply_checked_batch(db: *Database, batch: types.CheckedBatch) EngineError!void {
-    _ = db;
-    _ = batch;
-    return error.NotImplemented;
+    return batch_ops.apply_checked_batch(&db.state, db.allocator, batch);
 }

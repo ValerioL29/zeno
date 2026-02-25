@@ -57,9 +57,11 @@ pub fn scan_range_from_in_view(
 
 /// Applies one checked batch under the official advanced contract.
 ///
-/// Time Complexity: O(1) until checked-batch execution is implemented.
+/// Time Complexity: O(g + n + b + v), where `g` is `batch.guards.len`, `n` is surviving write count, `b` is total serialized value bytes measured during planning, and `v` is total cloned value size for prepared writes.
 ///
-/// Allocator: Does not allocate; returns `error.NotImplemented` until checked-batch execution is implemented.
+/// Allocator: Uses the engine base allocator for committed values and temporary planner scratch while validating guards and preparing the batch.
+///
+/// Ownership: Clones all surviving write values into engine-owned storage before making the batch visible.
 pub fn apply_checked_batch(db: *Database, batch: CheckedBatch) Error!void {
     return engine_db.apply_checked_batch(db, batch);
 }
