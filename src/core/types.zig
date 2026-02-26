@@ -37,14 +37,17 @@ pub const CheckedBatchGuard = checked_batch.CheckedBatchGuard;
 /// Prefix or range bounds for ordered key scans.
 pub const KeyRange = scan.KeyRange;
 
-/// One borrowed key/value pair yielded by scan operations.
+/// One owned key/value pair yielded by scan operations.
 pub const ScanEntry = scan.ScanEntry;
 
 /// Owned result container for full scan responses.
 pub const ScanResult = scan.ScanResult;
 
-/// Opaque continuation state for paginated scans.
+/// Borrowed continuation view for paginated scans.
 pub const ScanCursor = scan.ScanCursor;
+
+/// Owned continuation state retained independently of any page result.
+pub const OwnedScanCursor = scan.OwnedScanCursor;
 
 /// Owned result container for one paginated scan page.
 pub const ScanPageResult = scan.ScanPageResult;

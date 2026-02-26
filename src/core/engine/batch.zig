@@ -3,7 +3,7 @@
 //! Allocator: Uses explicit allocators for planning scratch and prepared batch-owned value clones.
 
 const std = @import("std");
-const engine_db = @import("db.zig");
+const error_mod = @import("error.zig");
 const internal_batch_plan = @import("../internal/batch_plan.zig");
 const internal_mutate = @import("../internal/mutate.zig");
 const internal_codec = @import("../internal/codec.zig");
@@ -39,7 +39,7 @@ fn cleanup_prepared_writes(prepared: []PreparedWrite, allocator: std.mem.Allocat
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-fn translate_plan_error(err: anyerror) engine_db.EngineError {
+fn translate_plan_error(err: anyerror) error_mod.EngineError {
     return switch (err) {
         error.EmptyKey, error.KeyTooLarge => error.KeyTooLarge,
         error.ValueTooLarge => error.ValueTooLarge,
@@ -126,7 +126,7 @@ fn apply_plan(
     allocator: std.mem.Allocator,
     plan: *internal_batch_plan.BatchPlan,
     guards: []const types.CheckedBatchGuard,
-) engine_db.EngineError!void {
+) error_mod.EngineError!void {
     state.visibility_gate.lock_exclusive();
     defer state.visibility_gate.unlock_exclusive();
 
@@ -194,7 +194,7 @@ pub fn apply_batch(
     state: *runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
     writes: []const types.PutWrite,
-) engine_db.EngineError!void {
+) error_mod.EngineError!void {
     var plan = internal_batch_plan.plan_put_batch(allocator, writes) catch |err| return translate_plan_error(err);
     defer plan.deinit();
     return apply_plan(state, allocator, &plan, &.{});
@@ -213,7 +213,7 @@ pub fn apply_checked_batch(
     state: *runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
     batch: types.CheckedBatch,
-) engine_db.EngineError!void {
+) error_mod.EngineError!void {
     validate_guards(allocator, batch.guards) catch |err| return translate_plan_error(err);
     var plan = internal_batch_plan.plan_put_batch(allocator, batch.writes) catch |err| return translate_plan_error(err);
     defer plan.deinit();

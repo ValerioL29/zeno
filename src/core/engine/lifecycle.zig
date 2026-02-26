@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const engine_db = @import("db.zig");
+const error_mod = @import("error.zig");
 const runtime_state = @import("../runtime/state.zig");
 const storage_replay = @import("../storage/replay.zig");
 const storage_snapshot = @import("../storage/snapshot.zig");
@@ -15,7 +16,7 @@ const types = @import("../types.zig");
 /// Time Complexity: O(s), where `s` is the runtime shard count.
 ///
 /// Allocator: Allocates the engine handle from `allocator`.
-pub fn create(allocator: std.mem.Allocator) engine_db.EngineError!*engine_db.Database {
+pub fn create(allocator: std.mem.Allocator) error_mod.EngineError!*engine_db.Database {
     const db = allocator.create(engine_db.Database) catch return error.OutOfMemory;
     errdefer allocator.destroy(db);
 
@@ -31,7 +32,7 @@ pub fn create(allocator: std.mem.Allocator) engine_db.EngineError!*engine_db.Dat
 /// Time Complexity: O(s) when no persistence is requested, where `s` is the runtime shard count.
 ///
 /// Allocator: Allocates the engine handle from `allocator`; storage-owned persistence remains partially unimplemented.
-pub fn open(allocator: std.mem.Allocator, options: types.DatabaseOptions) engine_db.EngineError!*engine_db.Database {
+pub fn open(allocator: std.mem.Allocator, options: types.DatabaseOptions) error_mod.EngineError!*engine_db.Database {
     var db = try create(allocator);
     errdefer db.close() catch unreachable;
     db.state.snapshot_path = options.snapshot_path;
@@ -66,7 +67,7 @@ pub fn open(allocator: std.mem.Allocator, options: types.DatabaseOptions) engine
 /// Ownership: Returns `error.ActiveReadViews` when any `ReadView` handles still borrow this database.
 ///
 /// Thread Safety: Not thread-safe; caller must ensure exclusive ownership of the engine handle.
-pub fn close(db: *engine_db.Database) engine_db.EngineError!void {
+pub fn close(db: *engine_db.Database) error_mod.EngineError!void {
     if (db.state.active_read_views.load(.monotonic) != 0) return error.ActiveReadViews;
     db.state.deinit();
     db.allocator.destroy(db);
@@ -77,7 +78,7 @@ pub fn close(db: *engine_db.Database) engine_db.EngineError!void {
 /// Time Complexity: O(1) until snapshot persistence is implemented.
 ///
 /// Allocator: Does not allocate; returns `error.NotImplemented` when snapshot persistence is requested.
-pub fn checkpoint(db: *engine_db.Database) engine_db.EngineError!void {
+pub fn checkpoint(db: *engine_db.Database) error_mod.EngineError!void {
     const snapshot_path = db.state.snapshot_path orelse return error.NotImplemented;
     _ = storage_snapshot.write(&db.state, db.allocator, snapshot_path, 0) catch return error.NotImplemented;
 }

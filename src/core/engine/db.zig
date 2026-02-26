@@ -4,23 +4,17 @@
 
 const std = @import("std");
 const batch_ops = @import("batch.zig");
+const error_mod = @import("error.zig");
 const internal_codec = @import("../internal/codec.zig");
 const lifecycle = @import("lifecycle.zig");
 const read = @import("read.zig");
+const scan_ops = @import("scan.zig");
 const runtime_state = @import("../runtime/state.zig");
 const types = @import("../types.zig");
 const write = @import("write.zig");
 
 /// Shared error set for engine contract operations.
-pub const EngineError = error{
-    NotImplemented,
-    OutOfMemory,
-    KeyTooLarge,
-    ActiveReadViews,
-    ValueTooLarge,
-    ValueTooDeep,
-    GuardFailed,
-};
+pub const EngineError = error_mod.EngineError;
 
 /// Central engine handle coordinated by the future engine layer.
 pub const Database = struct {
@@ -109,38 +103,36 @@ pub const Database = struct {
 
     /// Performs a full prefix scan over the current visible state.
     ///
-    /// Time Complexity: O(1) until scan behavior is implemented.
+    /// Time Complexity: O(s + m log m + v), where `s` is shard count, `m` is matched entry count, and `v` is total cloned value size.
     ///
-    /// Allocator: Does not allocate; returns `error.NotImplemented` until scan behavior is implemented.
+    /// Allocator: Allocates owned entry keys and values plus result storage through `allocator`.
     ///
-    /// Ownership: Does not return a result until scan behavior is implemented.
+    /// Ownership: Returns a result that owns all returned keys and values until `deinit`.
+    ///
+    /// Thread Safety: Acquires the shared side of the global visibility gate before taking shard shared locks to collect entries.
     pub fn scan_prefix(
         self: *const Database,
         allocator: std.mem.Allocator,
         prefix: []const u8,
     ) EngineError!types.ScanResult {
-        _ = self;
-        _ = allocator;
-        _ = prefix;
-        return error.NotImplemented;
+        return scan_ops.scan_prefix(&self.state, allocator, prefix);
     }
 
     /// Performs a full range scan over the current visible state.
     ///
-    /// Time Complexity: O(1) until scan behavior is implemented.
+    /// Time Complexity: O(s + m log m + v), where `s` is shard count, `m` is matched entry count, and `v` is total cloned value size.
     ///
-    /// Allocator: Does not allocate; returns `error.NotImplemented` until scan behavior is implemented.
+    /// Allocator: Allocates owned entry keys and values plus result storage through `allocator`.
     ///
-    /// Ownership: Does not return a result until scan behavior is implemented.
+    /// Ownership: Returns a result that owns all returned keys and values until `deinit`.
+    ///
+    /// Thread Safety: Acquires the shared side of the global visibility gate before taking shard shared locks to collect entries.
     pub fn scan_range(
         self: *const Database,
         allocator: std.mem.Allocator,
         range: types.KeyRange,
     ) EngineError!types.ScanResult {
-        _ = self;
-        _ = allocator;
-        _ = range;
-        return error.NotImplemented;
+        return scan_ops.scan_range(&self.state, allocator, range);
     }
 
     /// Applies one plain atomic batch.
@@ -162,7 +154,7 @@ pub const Database = struct {
     ///
     /// Allocator: Does not allocate.
     ///
-    /// Ownership: Returns a `ReadView` that borrows the engine runtime state until `deinit` is called.
+    /// Ownership: Returns a `ReadView` that keeps one registry-backed visibility hold alive until `deinit` is called.
     ///
     /// Thread Safety: Acquires the shared side of the global visibility gate and keeps it held for the lifetime of the returned `ReadView`.
     pub fn read_view(self: *Database) EngineError!types.ReadView {
@@ -279,6 +271,24 @@ test "read view copies release the visibility gate only once" {
     db.state.visibility_gate.unlock_exclusive();
 }
 
+test "in-view scans reject stale read view copies" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const value = types.Value{ .integer = 1 };
+    try db.put("alpha", &value);
+
+    var view = try db.read_view();
+    var copied = view;
+    defer copied.deinit();
+
+    view.deinit();
+
+    try testing.expectError(error.InvalidReadView, scan_prefix_from_in_view(&copied, testing.allocator, "alpha", null, 1));
+}
+
 test "close fails while a read view is still active" {
     const testing = std.testing;
 
@@ -375,13 +385,142 @@ test "apply_checked_batch validates guard keys and expected values" {
     }));
 }
 
+test "scan_prefix returns lexicographically ordered owned entries" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const alpha = types.Value{ .integer = 1 };
+    const alpha_one = types.Value{ .integer = 2 };
+    const beta = types.Value{ .integer = 3 };
+    try db.put("alpha", &alpha);
+    try db.put("alpha:1", &alpha_one);
+    try db.put("beta", &beta);
+
+    var result = try db.scan_prefix(testing.allocator, "alpha");
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 2), result.entries.items.len);
+    try testing.expectEqualStrings("alpha", result.entries.items[0].key);
+    try testing.expectEqualStrings("alpha:1", result.entries.items[1].key);
+    try testing.expectEqual(@as(i64, 1), result.entries.items[0].value.integer);
+    try testing.expectEqual(@as(i64, 2), result.entries.items[1].value.integer);
+}
+
+test "scan_range uses inclusive start and exclusive end" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const a = types.Value{ .integer = 1 };
+    const b = types.Value{ .integer = 2 };
+    const c = types.Value{ .integer = 3 };
+    try db.put("a", &a);
+    try db.put("b", &b);
+    try db.put("c", &c);
+
+    var result = try db.scan_range(testing.allocator, .{
+        .start = "a",
+        .end = "c",
+    });
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 2), result.entries.items.len);
+    try testing.expectEqualStrings("a", result.entries.items[0].key);
+    try testing.expectEqualStrings("b", result.entries.items[1].key);
+}
+
+test "scan_prefix_from_in_view paginates in key order" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const one = types.Value{ .integer = 1 };
+    const two = types.Value{ .integer = 2 };
+    const three = types.Value{ .integer = 3 };
+    try db.put("alpha", &one);
+    try db.put("alpha:1", &two);
+    try db.put("alpha:2", &three);
+
+    var view = try db.read_view();
+    defer view.deinit();
+
+    var first_page = try scan_prefix_from_in_view(&view, testing.allocator, "alpha", null, 2);
+    defer first_page.deinit();
+
+    try testing.expectEqual(@as(usize, 2), first_page.entries.items.len);
+    try testing.expect(first_page.borrow_next_cursor() != null);
+    try testing.expectEqualStrings("alpha", first_page.entries.items[0].key);
+    try testing.expectEqualStrings("alpha:1", first_page.entries.items[1].key);
+
+    var cursor = first_page.take_next_cursor().?;
+    defer cursor.deinit();
+    const cursor_view = cursor.as_cursor().?;
+    var second_page = try scan_prefix_from_in_view(&view, testing.allocator, "alpha", &cursor_view, 2);
+    defer second_page.deinit();
+
+    try testing.expectEqual(@as(usize, 1), second_page.entries.items.len);
+    try testing.expect(second_page.borrow_next_cursor() == null);
+    try testing.expectEqualStrings("alpha:2", second_page.entries.items[0].key);
+}
+
+test "scan page can promote one borrowed continuation cursor into owned storage" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const one = types.Value{ .integer = 1 };
+    const two = types.Value{ .integer = 2 };
+    try db.put("alpha", &one);
+    try db.put("alpha:1", &two);
+
+    var view = try db.read_view();
+    defer view.deinit();
+
+    var page = try scan_prefix_from_in_view(&view, testing.allocator, "alpha", null, 1);
+
+    const borrowed_cursor = page.borrow_next_cursor().?;
+    var owned_cursor = try borrowed_cursor.clone(testing.allocator);
+    defer owned_cursor.deinit();
+
+    page.deinit();
+
+    const cursor_view = owned_cursor.as_cursor().?;
+    var second_page = try scan_prefix_from_in_view(&view, testing.allocator, "alpha", &cursor_view, 1);
+    defer second_page.deinit();
+
+    try testing.expectEqual(@as(usize, 1), second_page.entries.items.len);
+    try testing.expectEqualStrings("alpha:1", second_page.entries.items[0].key);
+}
+
+test "owned scan cursor copies release continuation bytes only once" {
+    const testing = std.testing;
+
+    var cursor = try types.OwnedScanCursor.init(testing.allocator, 0, "alpha");
+    var copied = cursor;
+    defer copied.deinit();
+    defer cursor.deinit();
+
+    try testing.expect(cursor.as_cursor() != null);
+
+    cursor.deinit();
+
+    try testing.expect(copied.as_cursor() == null);
+}
+
 /// Scans the next prefix page inside a consistent read view.
 ///
-/// Time Complexity: O(1) until scan behavior is implemented.
+/// Time Complexity: O(s + m log m + v), where `s` is shard count, `m` is matched entry count, and `v` is total cloned value size.
 ///
-/// Allocator: Does not allocate; returns `error.NotImplemented` until scan behavior is implemented.
+/// Allocator: Allocates owned entry keys and values plus any continuation cursor through `allocator`.
 ///
-/// Ownership: `cursor` is borrowed when present and is never consumed by this call.
+/// Ownership: `cursor` is borrowed when present and must remain valid for the duration of the call. The returned page exposes any continuation cursor through `borrow_next_cursor` and may transfer it into `OwnedScanCursor` through `take_next_cursor`.
+///
+/// Thread Safety: Relies on the caller-owned `ReadView` visibility hold and takes shard shared locks while collecting entries.
 pub fn scan_prefix_from_in_view(
     view: *const types.ReadView,
     allocator: std.mem.Allocator,
@@ -389,21 +528,18 @@ pub fn scan_prefix_from_in_view(
     cursor: ?*const types.ScanCursor,
     limit: usize,
 ) EngineError!types.ScanPageResult {
-    _ = view;
-    _ = allocator;
-    _ = prefix;
-    _ = cursor;
-    _ = limit;
-    return error.NotImplemented;
+    return scan_ops.scan_prefix_from_in_view(view, allocator, prefix, cursor, limit);
 }
 
 /// Scans the next range page inside a consistent read view.
 ///
-/// Time Complexity: O(1) until scan behavior is implemented.
+/// Time Complexity: O(s + m log m + v), where `s` is shard count, `m` is matched entry count, and `v` is total cloned value size.
 ///
-/// Allocator: Does not allocate; returns `error.NotImplemented` until scan behavior is implemented.
+/// Allocator: Allocates owned entry keys and values plus any continuation cursor through `allocator`.
 ///
-/// Ownership: `cursor` is borrowed when present and is never consumed by this call.
+/// Ownership: `cursor` is borrowed when present and must remain valid for the duration of the call. The returned page exposes any continuation cursor through `borrow_next_cursor` and may transfer it into `OwnedScanCursor` through `take_next_cursor`.
+///
+/// Thread Safety: Relies on the caller-owned `ReadView` visibility hold and takes shard shared locks while collecting entries.
 pub fn scan_range_from_in_view(
     view: *const types.ReadView,
     allocator: std.mem.Allocator,
@@ -411,12 +547,7 @@ pub fn scan_range_from_in_view(
     cursor: ?*const types.ScanCursor,
     limit: usize,
 ) EngineError!types.ScanPageResult {
-    _ = view;
-    _ = allocator;
-    _ = range;
-    _ = cursor;
-    _ = limit;
-    return error.NotImplemented;
+    return scan_ops.scan_range_from_in_view(view, allocator, range, cursor, limit);
 }
 
 /// Applies one checked batch under the official advanced contract.

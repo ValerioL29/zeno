@@ -3,7 +3,7 @@
 //! Allocator: Uses explicit allocators only for returning owned cloned values to callers.
 
 const std = @import("std");
-const engine_db = @import("db.zig");
+const error_mod = @import("error.zig");
 const runtime_shard = @import("../runtime/shard.zig");
 const runtime_state = @import("../runtime/state.zig");
 const types = @import("../types.zig");
@@ -21,7 +21,7 @@ fn clone_plain_value_no_visibility(
     state: *const runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
     key: []const u8,
-) engine_db.EngineError!?types.Value {
+) error_mod.EngineError!?types.Value {
     const shard_idx = runtime_shard.get_shard_index(key);
     const shard = &state.shards[shard_idx];
 
@@ -42,7 +42,7 @@ fn clone_plain_value_no_visibility(
 /// Ownership: Returns a handle that borrows the runtime state and visibility gate until `deinit` is called.
 ///
 /// Thread Safety: Acquires the shared side of the global visibility gate and keeps it held for the lifetime of the returned `ReadView`.
-pub fn read_view(state: *const runtime_state.DatabaseState) engine_db.EngineError!types.ReadView {
+pub fn read_view(state: *const runtime_state.DatabaseState) error_mod.EngineError!types.ReadView {
     const visibility_gate = @constCast(&state.visibility_gate);
     visibility_gate.lock_shared();
     return types.ReadView.init(state, visibility_gate, @constCast(&state.active_read_views)) catch {
@@ -60,7 +60,7 @@ pub fn read_view(state: *const runtime_state.DatabaseState) engine_db.EngineErro
 /// Ownership: Returns a value owned by the caller when non-null. The caller must later call `deinit` with the same allocator.
 ///
 /// Thread Safety: Acquires the shared side of the global visibility gate before taking the selected shard's shared lock.
-pub fn get(state: *const runtime_state.DatabaseState, allocator: std.mem.Allocator, key: []const u8) engine_db.EngineError!?types.Value {
+pub fn get(state: *const runtime_state.DatabaseState, allocator: std.mem.Allocator, key: []const u8) error_mod.EngineError!?types.Value {
     const visibility_gate = @constCast(&state.visibility_gate);
     visibility_gate.lock_shared();
     defer visibility_gate.unlock_shared();

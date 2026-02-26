@@ -3,7 +3,7 @@
 //! Allocator: Uses the engine base allocator for owned key bytes and nested stored values.
 
 const std = @import("std");
-const engine_db = @import("db.zig");
+const error_mod = @import("error.zig");
 const runtime_shard = @import("../runtime/shard.zig");
 const runtime_state = @import("../runtime/state.zig");
 const types = @import("../types.zig");
@@ -20,7 +20,7 @@ pub const MAX_KEY_LEN: usize = 4_096;
 /// Ownership: Clones `value` into shard-owned storage before the call returns.
 ///
 /// Thread Safety: Acquires the exclusive side of the global visibility gate before taking the selected shard's exclusive lock.
-pub fn put(state: *runtime_state.DatabaseState, key: []const u8, value: *const types.Value) engine_db.EngineError!void {
+pub fn put(state: *runtime_state.DatabaseState, key: []const u8, value: *const types.Value) error_mod.EngineError!void {
     if (key.len == 0 or key.len > MAX_KEY_LEN) return error.KeyTooLarge;
 
     state.visibility_gate.lock_exclusive();
