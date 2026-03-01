@@ -2,7 +2,7 @@
 //! Cost: O(1) module reexports plus declared error metadata.
 //! Allocator: Does not allocate.
 
-/// Shared error set for engine contract operations, including live durability failures.
+/// Shared error set for engine contract operations, including durability and recovery failures.
 pub const EngineError = error{
     NotImplemented,
     OutOfMemory,
@@ -13,6 +13,7 @@ pub const EngineError = error{
     GuardFailed,
     InvalidReadView,
     WalFlushFailed,
+    SnapshotCorrupted,
     PersistenceIoFailure,
 };
 
@@ -25,6 +26,7 @@ pub fn map_persistence_error(err: anyerror) EngineError {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.WalFlushFailed => error.WalFlushFailed,
+        error.SnapshotCorrupted => error.SnapshotCorrupted,
         error.NotImplemented => error.NotImplemented,
         else => error.PersistenceIoFailure,
     };

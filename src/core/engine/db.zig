@@ -13,6 +13,7 @@ const read = @import("read.zig");
 const runtime_shard = @import("../runtime/shard.zig");
 const scan_ops = @import("scan.zig");
 const runtime_state = @import("../runtime/state.zig");
+const storage_snapshot = @import("../storage/snapshot.zig");
 const storage_wal = @import("../storage/wal.zig");
 const types = @import("../types.zig");
 const write = @import("write.zig");
@@ -178,9 +179,9 @@ pub fn create(allocator: std.mem.Allocator) EngineError!*Database {
 
 /// Opens an engine handle from the provided runtime options.
 ///
-/// Time Complexity: O(s), where `s` is the runtime shard count, when persistence is not requested.
+/// Time Complexity: O(s + n + r + e), where `s` is the runtime shard count, `n` is snapshot load work, `r` is replayed WAL work, and `e` is post-recovery expired-key purge work when persistence is configured.
 ///
-/// Allocator: Allocates the engine handle from `allocator`; persistence-backed open paths remain partially unimplemented.
+/// Allocator: Allocates the engine handle from `allocator` and uses explicit allocator paths for snapshot load and WAL replay scratch when persistence is configured.
 pub fn open(allocator: std.mem.Allocator, options: types.DatabaseOptions) EngineError!*Database {
     return lifecycle.open(allocator, options);
 }
@@ -201,6 +202,34 @@ fn has_ttl_for_test(db: *Database, key: []const u8) bool {
     shard.lock.lockShared();
     defer shard.lock.unlockShared();
     return internal_ttl_index.get_expire_at(shard, key) != null;
+}
+
+fn has_stored_key_for_test(db: *Database, key: []const u8) bool {
+    const shard_idx = runtime_shard.get_shard_index(key);
+    const shard = &db.state.shards[shard_idx];
+
+    shard.lock.lockShared();
+    defer shard.lock.unlockShared();
+    return shard.values.contains(key);
+}
+
+fn current_checkpoint_lsn_for_test(db: *Database) u64 {
+    if (db.state.wal) |wal| {
+        if (wal.next_lsn > 0) return wal.next_lsn - 1;
+    }
+    return 0;
+}
+
+fn corrupt_file_byte_for_test(path: []const u8, offset: u64, mask: u8) !void {
+    const file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
+    defer file.close();
+
+    try file.seekTo(offset);
+    var byte: [1]u8 = undefined;
+    try file.readNoEof(&byte);
+    byte[0] ^= mask;
+    try file.seekTo(offset);
+    try file.writeAll(&byte);
 }
 
 var noop_replay_ctx: u8 = 0;
@@ -241,12 +270,45 @@ test "create initializes runtime-owned database state" {
     try testing.expect(db.state.snapshot_path == null);
 }
 
-test "open with snapshot path remains unsupported during wal-only recovery step" {
+test "snapshot-only open restores values and ttl metadata without incrementing counters" {
     const testing = std.testing;
 
-    try testing.expectError(error.NotImplemented, open(testing.allocator, .{
-        .snapshot_path = "snapshot.rdb",
-    }));
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const snapshot_path = try std.fmt.allocPrint(testing.allocator, "{s}/step9-snapshot-only.snapshot", .{tmp.sub_path});
+    defer testing.allocator.free(snapshot_path);
+
+    {
+        const db = try create(testing.allocator);
+        defer db.close() catch unreachable;
+
+        const alpha = types.Value{ .string = "alive" };
+        const beta = types.Value{ .integer = 7 };
+        try db.put("alpha", &alpha);
+        try db.put("beta", &beta);
+        try set_ttl_for_test(db, "alpha", runtime_shard.unix_now() + 60);
+
+        _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, 33);
+    }
+
+    const reopened = try open(testing.allocator, .{
+        .snapshot_path = snapshot_path,
+    });
+    defer reopened.close() catch unreachable;
+
+    var alpha = (try reopened.get(testing.allocator, "alpha")).?;
+    defer alpha.deinit(testing.allocator);
+    var beta = (try reopened.get(testing.allocator, "beta")).?;
+    defer beta.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("alive", alpha.string);
+    try testing.expectEqual(@as(i64, 7), beta.integer);
+    try testing.expect((try reopened.ttl("alpha")) >= 0);
+    try testing.expectEqualStrings(snapshot_path, reopened.state.snapshot_path.?);
+    try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_put_total.load(.monotonic));
+    try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_delete_total.load(.monotonic));
+    try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_expire_total.load(.monotonic));
 }
 
 test "wal-only open replays recovered keys deletes and ttl metadata without incrementing counters" {
@@ -287,6 +349,216 @@ test "wal-only open replays recovered keys deletes and ttl metadata without incr
     try testing.expect((try reopened.get(testing.allocator, "beta")) == null);
     try testing.expect((try reopened.ttl("gamma")) >= 0);
 
+    try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_put_total.load(.monotonic));
+    try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_delete_total.load(.monotonic));
+    try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_expire_total.load(.monotonic));
+}
+
+test "snapshot-backed open replays wal delta after the snapshot lsn" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const wal_path = try std.fmt.allocPrint(testing.allocator, "{s}/step9-delta.wal", .{tmp.sub_path});
+    defer testing.allocator.free(wal_path);
+    const snapshot_path = try std.fmt.allocPrint(testing.allocator, "{s}/step9-delta.snapshot", .{tmp.sub_path});
+    defer testing.allocator.free(snapshot_path);
+
+    {
+        const db = try open(testing.allocator, .{
+            .wal_path = wal_path,
+            .fsync_mode = .none,
+        });
+        defer db.close() catch unreachable;
+
+        const one = types.Value{ .integer = 1 };
+        const two = types.Value{ .integer = 2 };
+        try db.put("alpha", &one);
+        try db.put("beta", &two);
+
+        _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, current_checkpoint_lsn_for_test(db));
+
+        const replacement = types.Value{ .integer = 9 };
+        const gamma = types.Value{ .string = "delta" };
+        try db.put("alpha", &replacement);
+        try testing.expect(try db.delete("beta"));
+        try db.put("gamma", &gamma);
+        try testing.expect(try db.expire_at("gamma", runtime_shard.unix_now() + 60));
+    }
+
+    const reopened = try open(testing.allocator, .{
+        .snapshot_path = snapshot_path,
+        .wal_path = wal_path,
+        .fsync_mode = .none,
+    });
+    defer reopened.close() catch unreachable;
+
+    var alpha = (try reopened.get(testing.allocator, "alpha")).?;
+    defer alpha.deinit(testing.allocator);
+    var gamma = (try reopened.get(testing.allocator, "gamma")).?;
+    defer gamma.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i64, 9), alpha.integer);
+    try testing.expect((try reopened.get(testing.allocator, "beta")) == null);
+    try testing.expectEqualStrings("delta", gamma.string);
+    try testing.expect((try reopened.ttl("gamma")) >= 0);
+    try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_put_total.load(.monotonic));
+    try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_delete_total.load(.monotonic));
+    try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_expire_total.load(.monotonic));
+}
+
+test "corrupted snapshot falls back to full wal replay when wal is non-empty" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const wal_path = try std.fmt.allocPrint(testing.allocator, "{s}/step9-fallback.wal", .{tmp.sub_path});
+    defer testing.allocator.free(wal_path);
+    const snapshot_path = try std.fmt.allocPrint(testing.allocator, "{s}/step9-fallback.snapshot", .{tmp.sub_path});
+    defer testing.allocator.free(snapshot_path);
+
+    {
+        const db = try open(testing.allocator, .{
+            .wal_path = wal_path,
+            .fsync_mode = .none,
+        });
+        defer db.close() catch unreachable;
+
+        const alpha = types.Value{ .integer = 1 };
+        const beta = types.Value{ .integer = 2 };
+        try db.put("alpha", &alpha);
+        _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, current_checkpoint_lsn_for_test(db));
+        try db.put("beta", &beta);
+    }
+
+    try corrupt_file_byte_for_test(snapshot_path, 0, 0xff);
+
+    const reopened = try open(testing.allocator, .{
+        .snapshot_path = snapshot_path,
+        .wal_path = wal_path,
+        .fsync_mode = .none,
+    });
+    defer reopened.close() catch unreachable;
+
+    var alpha = (try reopened.get(testing.allocator, "alpha")).?;
+    defer alpha.deinit(testing.allocator);
+    var beta = (try reopened.get(testing.allocator, "beta")).?;
+    defer beta.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i64, 1), alpha.integer);
+    try testing.expectEqual(@as(i64, 2), beta.integer);
+    try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_put_total.load(.monotonic));
+    try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_delete_total.load(.monotonic));
+    try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_expire_total.load(.monotonic));
+}
+
+test "corrupted snapshot with missing wal returns snapshot corrupted" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const snapshot_path = try std.fmt.allocPrint(testing.allocator, "{s}/step9-missing-wal.snapshot", .{tmp.sub_path});
+    defer testing.allocator.free(snapshot_path);
+    const wal_path = try std.fmt.allocPrint(testing.allocator, "{s}/missing.wal", .{tmp.sub_path});
+    defer testing.allocator.free(wal_path);
+
+    {
+        const db = try create(testing.allocator);
+        defer db.close() catch unreachable;
+
+        const alpha = types.Value{ .integer = 1 };
+        try db.put("alpha", &alpha);
+        _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, 0);
+    }
+
+    try corrupt_file_byte_for_test(snapshot_path, 0, 0xff);
+
+    try testing.expectError(error.SnapshotCorrupted, open(testing.allocator, .{
+        .snapshot_path = snapshot_path,
+        .wal_path = wal_path,
+        .fsync_mode = .none,
+    }));
+}
+
+test "corrupted snapshot with empty wal returns snapshot corrupted" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const snapshot_path = try std.fmt.allocPrint(testing.allocator, "{s}/step9-empty-wal.snapshot", .{tmp.sub_path});
+    defer testing.allocator.free(snapshot_path);
+    const wal_path = try std.fmt.allocPrint(testing.allocator, "{s}/empty.wal", .{tmp.sub_path});
+    defer testing.allocator.free(wal_path);
+
+    {
+        const db = try create(testing.allocator);
+        defer db.close() catch unreachable;
+
+        const alpha = types.Value{ .integer = 1 };
+        try db.put("alpha", &alpha);
+        _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, 0);
+    }
+
+    {
+        const file = try std.fs.cwd().createFile(wal_path, .{ .truncate = true });
+        file.close();
+    }
+    try corrupt_file_byte_for_test(snapshot_path, 0, 0xff);
+
+    try testing.expectError(error.SnapshotCorrupted, open(testing.allocator, .{
+        .snapshot_path = snapshot_path,
+        .wal_path = wal_path,
+        .fsync_mode = .none,
+    }));
+}
+
+test "open purges expired keys recovered from snapshot and wal replay" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const wal_path = try std.fmt.allocPrint(testing.allocator, "{s}/step9-purge.wal", .{tmp.sub_path});
+    defer testing.allocator.free(wal_path);
+    const snapshot_path = try std.fmt.allocPrint(testing.allocator, "{s}/step9-purge.snapshot", .{tmp.sub_path});
+    defer testing.allocator.free(snapshot_path);
+
+    {
+        const db = try open(testing.allocator, .{
+            .wal_path = wal_path,
+            .fsync_mode = .none,
+        });
+        defer db.close() catch unreachable;
+
+        const snapshot_value = types.Value{ .integer = 1 };
+        const wal_value = types.Value{ .integer = 2 };
+        try db.put("snapshot:expired", &snapshot_value);
+        try set_ttl_for_test(db, "snapshot:expired", runtime_shard.unix_now() - 10);
+        _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, current_checkpoint_lsn_for_test(db));
+
+        try db.state.wal.?.append_put("wal:expired", &wal_value);
+        try db.state.wal.?.append_expire("wal:expired", runtime_shard.unix_now() - 10);
+    }
+
+    const reopened = try open(testing.allocator, .{
+        .snapshot_path = snapshot_path,
+        .wal_path = wal_path,
+        .fsync_mode = .none,
+    });
+    defer reopened.close() catch unreachable;
+
+    try testing.expect((try reopened.get(testing.allocator, "snapshot:expired")) == null);
+    try testing.expect((try reopened.get(testing.allocator, "wal:expired")) == null);
+    try testing.expectEqual(@as(i64, -2), try reopened.ttl("snapshot:expired"));
+    try testing.expectEqual(@as(i64, -2), try reopened.ttl("wal:expired"));
+    try testing.expect(!has_ttl_for_test(reopened, "snapshot:expired"));
+    try testing.expect(!has_ttl_for_test(reopened, "wal:expired"));
+    try testing.expect(!has_stored_key_for_test(reopened, "snapshot:expired"));
+    try testing.expect(!has_stored_key_for_test(reopened, "wal:expired"));
     try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_put_total.load(.monotonic));
     try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_delete_total.load(.monotonic));
     try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_expire_total.load(.monotonic));

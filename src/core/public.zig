@@ -23,9 +23,9 @@ pub fn create(allocator: std.mem.Allocator) Error!*Database {
 
 /// Opens an engine handle from the provided runtime options.
 ///
-/// Time Complexity: O(s), where `s` is the runtime shard count, when persistence is not requested.
+/// Time Complexity: O(s + n + r + e), where `s` is the runtime shard count, `n` is snapshot load work, `r` is replayed WAL work, and `e` is post-recovery expired-key purge work when persistence is configured.
 ///
-/// Allocator: Allocates the engine handle and runtime state from `allocator` when persistence is not requested.
+/// Allocator: Allocates the engine handle and runtime state from `allocator` and uses explicit allocator paths for snapshot load and WAL replay scratch when persistence is configured.
 pub fn open(allocator: std.mem.Allocator, options: types.DatabaseOptions) Error!*Database {
     return engine_db.open(allocator, options);
 }

@@ -1,6 +1,6 @@
 //! Lifecycle ownership boundary for engine open, create, close, and checkpoint work.
-//! Cost: O(s) for runtime-state setup and teardown, where `s` is the shard count.
-//! Allocator: Uses explicit allocators for engine-handle ownership; storage I/O remains partially unimplemented.
+//! Time Complexity: O(s + n + r + e) for persistent open, where `s` is the shard count, `n` is snapshot load work, `r` is replayed WAL work, and `e` is recovery-time expired-key purge work.
+//! Allocator: Uses explicit allocators for engine-handle ownership plus snapshot-load and WAL-replay scratch.
 
 const std = @import("std");
 const engine_db = @import("db.zig");
@@ -19,26 +19,35 @@ const types = @import("../types.zig");
 ///
 /// Allocator: Allocates the engine handle from `allocator`.
 pub fn create(allocator: std.mem.Allocator) error_mod.EngineError!*engine_db.Database {
-    const db = allocator.create(engine_db.Database) catch return error.OutOfMemory;
-    errdefer allocator.destroy(db);
-
-    db.* = .{
-        .allocator = allocator,
-        .state = runtime_state.DatabaseState.init(allocator, null),
-    };
-    return db;
+    return create_with_snapshot_path(allocator, null);
 }
 
 /// Opens an engine handle and routes persistence work through storage-owned modules.
 ///
-/// Time Complexity: O(s + r), where `s` is the runtime shard count and `r` is replayed WAL record work when `wal_path` is set.
+/// Time Complexity: O(s + n + r + e), where `s` is the runtime shard count, `n` is snapshot load work, `r` is replayed WAL record work, and `e` is post-recovery expired-key purge work.
 ///
-/// Allocator: Allocates the engine handle from `allocator` and uses explicit allocator paths for WAL replay scratch when `wal_path` is set.
+/// Allocator: Allocates the engine handle from `allocator` and uses explicit allocator paths for snapshot load and WAL replay scratch when persistence is configured.
+///
+/// Thread Safety: Not thread-safe during open; recovery mutates runtime state before the database handle is published to callers.
 pub fn open(allocator: std.mem.Allocator, options: types.DatabaseOptions) error_mod.EngineError!*engine_db.Database {
-    if (options.snapshot_path != null) return error.NotImplemented;
-
-    var db = try create(allocator);
+    var db = try create_with_snapshot_path(allocator, options.snapshot_path);
     errdefer db.close() catch unreachable;
+
+    var snapshot_lsn: u64 = 0;
+    if (options.snapshot_path) |snapshot_path| {
+        if (storage_snapshot.load(&db.state, allocator, snapshot_path)) |result| {
+            snapshot_lsn = result.checkpoint_lsn;
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            error.SnapshotCorrupted => {
+                const wal_has_content = wal_file_has_content(options.wal_path);
+                if (!wal_has_content) return error.SnapshotCorrupted;
+
+                reset_runtime_shards_for_recovery(&db.state);
+            },
+            else => return error_mod.map_persistence_error(err),
+        }
+    }
 
     if (options.wal_path) |wal_path| {
         const replay_applier = storage_wal.ReplayApplier{
@@ -50,10 +59,25 @@ pub fn open(allocator: std.mem.Allocator, options: types.DatabaseOptions) error_
         db.state.wal = storage_wal.open(wal_path, .{
             .fsync_mode = options.fsync_mode,
             .fsync_interval_ms = options.fsync_interval_ms,
-            .min_lsn = 0,
-        }, replay_applier, allocator) catch return error.NotImplemented;
+            .min_lsn = snapshot_lsn,
+        }, replay_applier, allocator) catch |err| return error_mod.map_persistence_error(err);
     }
 
+    try purge_expired_after_recovery(&db.state);
+    return db;
+}
+
+fn create_with_snapshot_path(
+    allocator: std.mem.Allocator,
+    snapshot_path: ?[]const u8,
+) error_mod.EngineError!*engine_db.Database {
+    const db = allocator.create(engine_db.Database) catch return error.OutOfMemory;
+    errdefer allocator.destroy(db);
+
+    db.* = .{
+        .allocator = allocator,
+        .state = runtime_state.DatabaseState.init(allocator, snapshot_path),
+    };
     return db;
 }
 
@@ -79,12 +103,56 @@ pub fn close(db: *engine_db.Database) error_mod.EngineError!void {
 
 /// Writes one consistent checkpoint through the storage-owned snapshot boundary.
 ///
-/// Time Complexity: O(1) until snapshot persistence is implemented.
+/// Time Complexity: O(1) until checkpoint behavior is implemented.
 ///
-/// Allocator: Does not allocate; returns `error.NotImplemented` when snapshot persistence is requested.
+/// Allocator: Does not allocate; returns `error.NotImplemented` until checkpoint behavior is implemented.
+///
+/// Thread Safety: Not thread-safe; caller must ensure exclusive ownership of the engine handle.
 pub fn checkpoint(db: *engine_db.Database) error_mod.EngineError!void {
-    const snapshot_path = db.state.snapshot_path orelse return error.NotImplemented;
-    _ = storage_snapshot.write(&db.state, db.allocator, snapshot_path, 0) catch return error.NotImplemented;
+    _ = db;
+    return error.NotImplemented;
+}
+
+fn wal_file_has_content(wal_path: ?[]const u8) bool {
+    const path = wal_path orelse return false;
+    const file = std.fs.cwd().openFile(path, .{}) catch return false;
+    defer file.close();
+
+    const size = file.getEndPos() catch return false;
+    return size > 0;
+}
+
+fn reset_runtime_shards_for_recovery(state: *runtime_state.DatabaseState) void {
+    for (&state.shards) |*shard| {
+        shard.deinit();
+        shard.* = runtime_shard.Shard.init(state.base_allocator);
+    }
+}
+
+fn purge_expired_after_recovery(state: *runtime_state.DatabaseState) !void {
+    const now = runtime_shard.unix_now();
+
+    for (&state.shards) |*shard| {
+        shard.lock.lock();
+        defer shard.lock.unlock();
+
+        var expired_keys = std.ArrayList([]u8).init(state.base_allocator);
+        defer {
+            for (expired_keys.items) |key| state.base_allocator.free(key);
+            expired_keys.deinit();
+        }
+
+        var iterator = shard.ttl_index.iterator();
+        while (iterator.next()) |entry| {
+            if (!internal_ttl_index.is_expired(entry.value_ptr.*, now)) continue;
+            try expired_keys.append(try state.base_allocator.dupe(u8, entry.key_ptr.*));
+        }
+
+        for (expired_keys.items) |key| {
+            _ = internal_mutate.remove_stored_value_unlocked(shard, state.base_allocator, key);
+            internal_ttl_index.clear_ttl_entry(shard, key);
+        }
+    }
 }
 
 fn replay_put(ctx: *anyopaque, key: []const u8, value: *const @import("../types/value.zig").Value) !void {
