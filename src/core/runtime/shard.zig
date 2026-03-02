@@ -55,7 +55,6 @@ pub const Shard = struct {
     base_allocator: std.mem.Allocator,
     values: std.StringHashMapUnmanaged(types.Value) = .{},
     ttl_index: std.StringHashMapUnmanaged(i64) = .{},
-    committed_batch_count: usize = 0,
 
     /// Initializes one shard-local runtime state container.
     ///
@@ -70,6 +69,52 @@ pub const Shard = struct {
         };
     }
 
+    /// Releases all current value and TTL entries without touching the shard lock.
+    ///
+    /// Time Complexity: O(n + t + b), where `n` is retained key count, `t` is retained TTL entry count, and `b` is total bytes owned by nested values.
+    ///
+    /// Allocator: Does not allocate; frees owned keys, nested values, and TTL metadata through `base_allocator`.
+    ///
+    /// Thread Safety: Not thread-safe; caller must already hold exclusive shard ownership or otherwise prove no concurrent access.
+    pub fn clear_unlocked(self: *Shard) void {
+        var ttl_iterator = self.ttl_index.iterator();
+        while (ttl_iterator.next()) |entry| {
+            self.base_allocator.free(entry.key_ptr.*);
+        }
+        self.ttl_index.deinit(self.base_allocator);
+        self.ttl_index = .{};
+
+        var value_iterator = self.values.iterator();
+        while (value_iterator.next()) |entry| {
+            self.base_allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(self.base_allocator);
+        }
+        self.values.deinit(self.base_allocator);
+        self.values = .{};
+    }
+
+    /// Clears all shard contents while retaining map capacity for reuse.
+    ///
+    /// Time Complexity: O(n + t + b), where `n` is retained key count, `t` is retained TTL entry count, and `b` is total bytes owned by nested values.
+    ///
+    /// Allocator: Does not allocate; frees owned keys, nested values, and TTL metadata through `base_allocator` while retaining the current map buffers.
+    ///
+    /// Thread Safety: Not thread-safe; caller must already hold exclusive shard ownership or otherwise prove no concurrent access.
+    pub fn reset_unlocked(self: *Shard) void {
+        var ttl_iterator = self.ttl_index.iterator();
+        while (ttl_iterator.next()) |entry| {
+            self.base_allocator.free(entry.key_ptr.*);
+        }
+        self.ttl_index.clearRetainingCapacity();
+
+        var value_iterator = self.values.iterator();
+        while (value_iterator.next()) |entry| {
+            self.base_allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(self.base_allocator);
+        }
+        self.values.clearRetainingCapacity();
+    }
+
     /// Releases shard-local runtime resources.
     ///
     /// Time Complexity: O(n + t + b), where `n` is retained key count, `t` is retained TTL entry count, and `b` is total bytes owned by nested values.
@@ -78,18 +123,7 @@ pub const Shard = struct {
     ///
     /// Thread Safety: Not thread-safe; caller must ensure exclusive ownership.
     pub fn deinit(self: *Shard) void {
-        var ttl_iterator = self.ttl_index.iterator();
-        while (ttl_iterator.next()) |entry| {
-            self.base_allocator.free(entry.key_ptr.*);
-        }
-        self.ttl_index.deinit(self.base_allocator);
-
-        var iterator = self.values.iterator();
-        while (iterator.next()) |entry| {
-            self.base_allocator.free(entry.key_ptr.*);
-            entry.value_ptr.deinit(self.base_allocator);
-        }
-        self.values.deinit(self.base_allocator);
+        self.clear_unlocked();
         self.* = undefined;
     }
 };
@@ -109,4 +143,23 @@ test "unix_now returns a recent unix timestamp" {
 
     const now = unix_now();
     try testing.expect(now > 0);
+}
+
+test "reset_unlocked leaves the shard empty and reusable" {
+    const testing = std.testing;
+
+    var shard = Shard.init(testing.allocator);
+    defer shard.deinit();
+
+    try shard.values.put(testing.allocator, try testing.allocator.dupe(u8, "alpha"), .{ .integer = 1 });
+    try shard.ttl_index.put(testing.allocator, try testing.allocator.dupe(u8, "alpha"), 10);
+
+    shard.reset_unlocked();
+
+    try testing.expectEqual(@as(usize, 0), shard.values.count());
+    try testing.expectEqual(@as(usize, 0), shard.ttl_index.count());
+
+    try shard.values.put(testing.allocator, try testing.allocator.dupe(u8, "beta"), .{ .integer = 2 });
+    try testing.expectEqual(@as(usize, 1), shard.values.count());
+    try testing.expect(shard.values.contains("beta"));
 }

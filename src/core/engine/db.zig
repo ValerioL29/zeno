@@ -9,6 +9,7 @@ const expiration = @import("expiration.zig");
 const internal_codec = @import("../internal/codec.zig");
 const internal_ttl_index = @import("../internal/ttl_index.zig");
 const lifecycle = @import("lifecycle.zig");
+const metrics = @import("metrics.zig");
 const read = @import("read.zig");
 const runtime_shard = @import("../runtime/shard.zig");
 const scan_ops = @import("scan.zig");
@@ -49,10 +50,11 @@ pub const Database = struct {
     /// Ownership: Returns `error.NoSnapshotPath` when `snapshot_path` was not configured for this engine handle.
     ///
     /// Thread Safety: Not safe to call concurrently with other mutation of the same engine handle.
-    /// Writers are blocked globally during the brief checkpoint barrier and during each
-    /// shard-serialization window, while active read traffic may delay completion.
+    /// Active `ReadView` handles may delay the brief checkpoint barrier before it begins, then
+    /// writers and new readers are blocked globally during that barrier and writers are blocked
+    /// globally again during each shard-serialization window.
     pub fn checkpoint(self: *Database) EngineError!void {
-        return lifecycle.checkpoint(self);
+        return metrics.call_with_latency(&self.state, lifecycle.checkpoint, .{self});
     }
 
     /// Reads one key from the engine contract surface.
@@ -63,7 +65,7 @@ pub const Database = struct {
     ///
     /// Ownership: Returns a caller-owned cloned value when non-null. The caller must later call `deinit` with `allocator`.
     pub fn get(self: *const Database, allocator: std.mem.Allocator, key: []const u8) EngineError!?types.Value {
-        return read.get(&self.state, allocator, key);
+        return metrics.call_with_latency(&self.state, read.get, .{ &self.state, allocator, key });
     }
 
     /// Writes one plain key/value pair through the engine contract surface.
@@ -76,7 +78,7 @@ pub const Database = struct {
     ///
     /// Thread Safety: Safe for concurrent use with other point operations; acquires the global visibility gate exclusively before taking one shard-exclusive lock.
     pub fn put(self: *Database, key: []const u8, value: *const types.Value) EngineError!void {
-        return write.put(&self.state, key, value);
+        return metrics.call_with_latency(&self.state, write.put, .{ &self.state, key, value });
     }
 
     /// Deletes one plain key from the engine contract surface.
@@ -87,7 +89,7 @@ pub const Database = struct {
     ///
     /// Thread Safety: Safe for concurrent use with other point operations; acquires the global visibility gate exclusively before taking one shard-exclusive lock and appends the live DELETE record inside that same visibility window.
     pub fn delete(self: *Database, key: []const u8) EngineError!bool {
-        return write.delete(&self.state, key);
+        return metrics.call_with_latency(&self.state, write.delete, .{ &self.state, key });
     }
 
     /// Sets or clears key expiration at an absolute unix-second timestamp.
@@ -98,9 +100,7 @@ pub const Database = struct {
     ///
     /// Thread Safety: Safe for concurrent use with reads and scans; acquires the global visibility gate exclusively before taking one shard-exclusive lock.
     pub fn expire_at(self: *Database, key: []const u8, unix_seconds: ?i64) EngineError!bool {
-        const updated = try expiration.expire_at(&self.state, key, unix_seconds);
-        _ = self.state.counters.ops_expire_total.fetchAdd(1, .monotonic);
-        return updated;
+        return metrics.call_with_latency(&self.state, expire_at_boundary, .{ self, key, unix_seconds });
     }
 
     /// Returns Redis-style TTL for one plain key.
@@ -111,7 +111,7 @@ pub const Database = struct {
     ///
     /// Thread Safety: Acquires the shared side of the global visibility gate before taking one shard shared lock for TTL reads and only attempts lazy cleanup afterward if the exclusive visibility gate can be acquired immediately.
     pub fn ttl(self: *const Database, key: []const u8) EngineError!i64 {
-        return expiration.ttl(@constCast(&self.state), key);
+        return metrics.call_with_latency(&self.state, expiration.ttl, .{ @constCast(&self.state), key });
     }
 
     /// Performs a full prefix scan over the current visible state.
@@ -128,7 +128,7 @@ pub const Database = struct {
         allocator: std.mem.Allocator,
         prefix: []const u8,
     ) EngineError!types.ScanResult {
-        return scan_ops.scan_prefix(&self.state, allocator, prefix);
+        return metrics.call_with_latency(&self.state, scan_ops.scan_prefix, .{ &self.state, allocator, prefix });
     }
 
     /// Performs a full range scan over the current visible state.
@@ -145,7 +145,7 @@ pub const Database = struct {
         allocator: std.mem.Allocator,
         range: types.KeyRange,
     ) EngineError!types.ScanResult {
-        return scan_ops.scan_range(&self.state, allocator, range);
+        return metrics.call_with_latency(&self.state, scan_ops.scan_range, .{ &self.state, allocator, range });
     }
 
     /// Applies one plain atomic batch.
@@ -158,7 +158,7 @@ pub const Database = struct {
     ///
     /// Thread Safety: Safe for concurrent use with point operations and read views; acquires the global visibility gate exclusively for the full apply window.
     pub fn apply_batch(self: *Database, writes: []const types.PutWrite) EngineError!void {
-        return batch_ops.apply_batch(&self.state, self.allocator, writes);
+        return metrics.call_with_latency(&self.state, batch_ops.apply_batch, .{ &self.state, self.allocator, writes });
     }
 
     /// Opens one consistent read view.
@@ -171,7 +171,7 @@ pub const Database = struct {
     ///
     /// Thread Safety: Acquires the shared side of the global visibility gate and keeps it held for the lifetime of the returned `ReadView`.
     pub fn read_view(self: *Database) EngineError!types.ReadView {
-        return read.read_view(&self.state);
+        return metrics.call_with_latency(&self.state, read.read_view, .{&self.state});
     }
 };
 
@@ -218,6 +218,21 @@ fn has_stored_key_for_test(db: *Database, key: []const u8) bool {
     shard.lock.lockShared();
     defer shard.lock.unlockShared();
     return shard.values.contains(key);
+}
+
+fn expire_at_boundary(db: *Database, key: []const u8, unix_seconds: ?i64) EngineError!bool {
+    const updated = try expiration.expire_at(&db.state, key, unix_seconds);
+    _ = db.state.counters.ops_expire_total.fetchAdd(1, .monotonic);
+    return updated;
+}
+
+fn runtime_state_from_view_for_latency(view: *const types.ReadView) ?*const runtime_state.DatabaseState {
+    const opaque_state = view.resolve_runtime_state() orelse return null;
+    return @ptrCast(@alignCast(opaque_state));
+}
+
+fn latency_samples_for_test(db: *const Database) u64 {
+    return db.state.stats_snapshot().latency_samples_total;
 }
 
 fn current_checkpoint_lsn_for_test(db: *Database) u64 {
@@ -476,6 +491,7 @@ test "corrupted snapshot falls back to full wal replay when wal is non-empty" {
     try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_put_total.load(.monotonic));
     try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_delete_total.load(.monotonic));
     try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_expire_total.load(.monotonic));
+    try testing.expectEqual(@as(u64, 1), reopened.state.stats_snapshot().snapshot_corruption_fallback_total);
 }
 
 test "corrupted snapshot with missing wal returns snapshot corrupted" {
@@ -595,6 +611,11 @@ test "checkpoint without a configured snapshot path returns no snapshot path" {
     defer db.close() catch unreachable;
 
     try testing.expectError(error.NoSnapshotPath, db.checkpoint());
+    const stats = db.state.stats_snapshot();
+    try testing.expectEqual(@as(u64, 1), stats.latency_samples_total);
+    try testing.expectEqual(@as(u64, 0), stats.checkpoint_count_total);
+    try testing.expectEqual(@as(u64, 0), stats.checkpoint_duration_last_ms);
+    try testing.expectEqual(@as(u64, 0), stats.checkpoint_lsn_last);
 }
 
 test "checkpoint writes a snapshot and reopens the same visible state" {
@@ -618,6 +639,9 @@ test "checkpoint writes a snapshot and reopens the same visible state" {
         try db.put("beta", &beta_value);
         try db.expire_at("beta", runtime_shard.unix_now() + 60);
         try db.checkpoint();
+        const stats = db.state.stats_snapshot();
+        try testing.expectEqual(@as(u64, 1), stats.checkpoint_count_total);
+        try testing.expectEqual(@as(u64, 0), stats.checkpoint_lsn_last);
     }
 
     const reopened = try open(testing.allocator, .{
@@ -709,15 +733,19 @@ test "checkpoint stays compatible with an active read view" {
     while (!checkpoint_state.barrier_attempted.load(.acquire)) {
         std.Thread.sleep(std.time.ns_per_ms);
     }
+    std.Thread.sleep(40 * std.time.ns_per_ms);
     try testing.expect(!checkpoint_state.barrier_acquired.load(.acquire));
     try testing.expect(!checkpoint_state.finished.load(.acquire));
 
     view.deinit();
     checkpoint_thread.join();
 
+    const stats = db.state.stats_snapshot();
     try testing.expect(checkpoint_state.barrier_acquired.load(.acquire));
     try testing.expect(checkpoint_state.finished.load(.acquire));
     try testing.expect(checkpoint_state.checkpoint_error == null);
+    try testing.expectEqual(@as(u64, 1), stats.checkpoint_count_total);
+    try testing.expect(stats.checkpoint_duration_last_ms >= 40);
 
     const reopened = try open(testing.allocator, .{
         .snapshot_path = snapshot_path,
@@ -727,6 +755,94 @@ test "checkpoint stays compatible with an active read view" {
     var alpha = (try reopened.get(testing.allocator, "alpha")).?;
     defer alpha.deinit(testing.allocator);
     try testing.expectEqualStrings("hello", alpha.string);
+}
+
+test "engine boundary latency sampling records one sample per call including errors" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const value = types.Value{ .integer = 1 };
+    var expected = latency_samples_for_test(db);
+
+    try db.put("alpha", &value);
+    expected += 1;
+    try testing.expectEqual(expected, latency_samples_for_test(db));
+
+    var alpha = (try db.get(testing.allocator, "alpha")).?;
+    defer alpha.deinit(testing.allocator);
+    expected += 1;
+    try testing.expectEqual(expected, latency_samples_for_test(db));
+
+    try testing.expect(!try db.expire_at("missing", runtime_shard.unix_now() + 30));
+    expected += 1;
+    try testing.expectEqual(expected, latency_samples_for_test(db));
+
+    _ = try db.ttl("alpha");
+    expected += 1;
+    try testing.expectEqual(expected, latency_samples_for_test(db));
+
+    var prefix = try db.scan_prefix(testing.allocator, "a");
+    defer prefix.deinit();
+    expected += 1;
+    try testing.expectEqual(expected, latency_samples_for_test(db));
+
+    var range = try db.scan_range(testing.allocator, .{
+        .start = "a",
+        .end = "z",
+    });
+    defer range.deinit();
+    expected += 1;
+    try testing.expectEqual(expected, latency_samples_for_test(db));
+
+    try db.apply_batch(&.{
+        .{ .key = "beta", .value = &value },
+    });
+    expected += 1;
+    try testing.expectEqual(expected, latency_samples_for_test(db));
+
+    var view = try db.read_view();
+    defer view.deinit();
+    expected += 1;
+    try testing.expectEqual(expected, latency_samples_for_test(db));
+
+    var in_view_prefix = try scan_prefix_from_in_view(&view, testing.allocator, "", null, 10);
+    defer in_view_prefix.deinit();
+    expected += 1;
+    try testing.expectEqual(expected, latency_samples_for_test(db));
+
+    var in_view_range = try scan_range_from_in_view(&view, testing.allocator, .{
+        .start = "a",
+        .end = "z",
+    }, null, 10);
+    defer in_view_range.deinit();
+    expected += 1;
+    try testing.expectEqual(expected, latency_samples_for_test(db));
+
+    try apply_checked_batch(db, .{
+        .writes = &.{
+            .{ .key = "gamma", .value = &value },
+        },
+        .guards = &.{
+            .{ .key_exists = "alpha" },
+        },
+    });
+    expected += 1;
+    try testing.expectEqual(expected, latency_samples_for_test(db));
+
+    try testing.expectError(error.KeyTooLarge, db.put("", &value));
+    expected += 1;
+    try testing.expectEqual(expected, latency_samples_for_test(db));
+
+    try testing.expectError(error.KeyTooLarge, apply_checked_batch(db, .{
+        .writes = &.{
+            .{ .key = "", .value = &value },
+        },
+        .guards = &.{},
+    }));
+    expected += 1;
+    try testing.expectEqual(expected, latency_samples_for_test(db));
 }
 
 test "wal-only restart preserves committed batch semantics" {
@@ -1710,7 +1826,8 @@ pub fn scan_prefix_from_in_view(
     cursor: ?*const types.ScanCursor,
     limit: usize,
 ) EngineError!types.ScanPageResult {
-    return scan_ops.scan_prefix_from_in_view(view, allocator, prefix, cursor, limit);
+    const state = runtime_state_from_view_for_latency(view);
+    return metrics.call_with_optional_latency(state, scan_ops.scan_prefix_from_in_view, .{ view, allocator, prefix, cursor, limit });
 }
 
 /// Scans the next range page inside a consistent read view.
@@ -1729,7 +1846,8 @@ pub fn scan_range_from_in_view(
     cursor: ?*const types.ScanCursor,
     limit: usize,
 ) EngineError!types.ScanPageResult {
-    return scan_ops.scan_range_from_in_view(view, allocator, range, cursor, limit);
+    const state = runtime_state_from_view_for_latency(view);
+    return metrics.call_with_optional_latency(state, scan_ops.scan_range_from_in_view, .{ view, allocator, range, cursor, limit });
 }
 
 /// Applies one checked batch under the official advanced contract.
@@ -1742,5 +1860,5 @@ pub fn scan_range_from_in_view(
 ///
 /// Thread Safety: Safe for concurrent use with point operations and read views; acquires the global visibility gate exclusively for the full guard-check and apply window.
 pub fn apply_checked_batch(db: *Database, batch: types.CheckedBatch) EngineError!void {
-    return batch_ops.apply_checked_batch(&db.state, db.allocator, batch);
+    return metrics.call_with_latency(&db.state, batch_ops.apply_checked_batch, .{ &db.state, db.allocator, batch });
 }

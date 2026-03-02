@@ -297,10 +297,9 @@ pub fn load(
         live_shard.lock.lock();
         defer live_shard.lock.unlock();
 
-        clear_live_shard_unlocked(live_shard);
+        live_shard.clear_unlocked();
         live_shard.values = loaded_shards[index].values;
         live_shard.ttl_index = loaded_shards[index].ttl_index;
-        live_shard.committed_batch_count = 0;
         loaded_shards[index].values = .{};
         loaded_shards[index].ttl_index = .{};
     }
@@ -459,28 +458,6 @@ fn collect_sorted_ttl_entries(allocator: std.mem.Allocator, shard: *const runtim
     }
     std.mem.sort(BorrowedTtlEntry, entries, {}, borrowed_ttl_less_than);
     return entries;
-}
-
-/// Releases the current live contents of one shard without touching its lock or allocator.
-///
-/// Time Complexity: O(n + t + b), where `n` is value count, `t` is TTL count, and `b` is nested value teardown work.
-///
-/// Allocator: Does not allocate; frees all current shard-owned keys, values, and TTL metadata through `base_allocator`.
-fn clear_live_shard_unlocked(shard: *runtime_shard.Shard) void {
-    var ttl_iterator = shard.ttl_index.iterator();
-    while (ttl_iterator.next()) |entry| {
-        shard.base_allocator.free(entry.key_ptr.*);
-    }
-    shard.ttl_index.deinit(shard.base_allocator);
-    shard.ttl_index = .{};
-
-    var value_iterator = shard.values.iterator();
-    while (value_iterator.next()) |entry| {
-        shard.base_allocator.free(entry.key_ptr.*);
-        entry.value_ptr.deinit(shard.base_allocator);
-    }
-    shard.values.deinit(shard.base_allocator);
-    shard.values = .{};
 }
 
 /// Orders borrowed value entries lexicographically by key bytes.
