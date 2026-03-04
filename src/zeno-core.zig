@@ -13,6 +13,12 @@ pub const official = @import("core/official.zig");
 /// Public access point for core-facing types.
 pub const types = @import("core/types.zig");
 
+test "package root includes internal art module tests without exporting them" {
+    _ = @import("core/index/art/node.zig");
+    _ = @import("core/index/art/prepared_insert.zig");
+    _ = @import("core/index/art/tree.zig");
+}
+
 test "package root exposes contract modules" {
     _ = public;
     _ = official;
