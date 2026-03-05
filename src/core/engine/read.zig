@@ -1,5 +1,5 @@
 //! Read-semantics ownership boundary for point reads and read-view-aware reads.
-//! Cost: O(n^2 + k + v) for point reads, where `n` is key length for shard routing, `k` is hash-map lookup work, and `v` is cloned value size.
+//! Cost: O(n + k + v) for point reads, where `n` is key length for shard routing, `k` is ART lookup work, and `v` is cloned value size.
 //! Allocator: Uses explicit allocators only for returning owned cloned values to callers.
 
 const std = @import("std");
@@ -11,7 +11,7 @@ const types = @import("../types.zig");
 
 /// Clones the current plain value for `key` while relying on an already-held visibility window.
 ///
-/// Time Complexity: O(n^2 + k + v), where `n` is `key.len` for shard routing, `k` is hash-map lookup work, and `v` is the size of the cloned value tree.
+/// Time Complexity: O(n + k + v), where `n` is `key.len` for shard routing, `k` is ART lookup work, and `v` is the size of the cloned value tree.
 ///
 /// Allocator: Allocates the returned cloned value through `allocator` when the key exists.
 ///
@@ -31,7 +31,7 @@ fn clone_plain_value_no_visibility(
     defer shard.lock.unlockShared();
     _ = state.counters.ops_get_total.fetchAdd(1, .monotonic);
 
-    const stored = shard.values.getPtr(key) orelse return null;
+    const stored = shard.tree.lookup(key) orelse return null;
     if (!expiration.key_is_visible_unlocked(shard, key, now)) return null;
     return try stored.clone(allocator);
 }
@@ -61,7 +61,7 @@ pub fn read_view(state: *const runtime_state.DatabaseState) error_mod.EngineErro
 
 /// Clones the current plain value for `key` under the shared visibility gate.
 ///
-/// Time Complexity: O(n^2 + k + v), where `n` is `key.len` for shard routing, `k` is hash-map lookup work, and `v` is the size of the cloned value tree.
+/// Time Complexity: O(n + k + v), where `n` is `key.len` for shard routing, `k` is ART lookup work, and `v` is the size of the cloned value tree.
 ///
 /// Allocator: Allocates the returned cloned value through `allocator` when the key exists.
 ///

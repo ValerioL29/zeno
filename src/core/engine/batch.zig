@@ -1,47 +1,56 @@
 //! Batch-semantics ownership boundary for atomic plain and guarded writes.
-//! Cost: O(n + b + v), where `n` is batch size, `b` is total serialized value bytes measured during planning, and `v` is total cloned value size for prepared writes.
-//! Allocator: Uses explicit allocators for planning scratch and prepared batch-owned value clones.
+//! Cost: O(g + s + n * (k + v)), where `g` is touched shard-group count, `s` is shadow-planning work, `n` is survivor write count, `k` is average key length, and `v` is value clone cost.
+//! Allocator: Uses explicit allocators for planning scratch, committed delta arenas, and temporary WAL batch views.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const art = @import("../index/art/tree.zig");
+const art_node = @import("../index/art/node.zig");
 const durability = @import("durability.zig");
 const expiration = @import("expiration.zig");
 const error_mod = @import("error.zig");
 const internal_batch_plan = @import("../internal/batch_plan.zig");
-const internal_mutate = @import("../internal/mutate.zig");
 const internal_codec = @import("../internal/codec.zig");
+const internal_mutate = @import("../internal/mutate.zig");
 const internal_ttl_index = @import("../internal/ttl_index.zig");
 const runtime_shard = @import("../runtime/shard.zig");
 const runtime_state = @import("../runtime/state.zig");
 const types = @import("../types.zig");
 
-/// One prepared survivor write that is ready to enter the atomic apply window.
-const PreparedWrite = struct {
-    shard_idx: usize,
-    key: []const u8,
-    owned_insert_key: ?[]u8,
-    new_value: types.Value,
-    transferred: bool = false,
+const PUT_BATCH_APPLY_STACK_BYTES = 32 * 1024;
+
+var pause_after_visibility_gate = std.atomic.Value(bool).init(false);
+var paused_at_visibility_gate = std.atomic.Value(bool).init(false);
+var resume_after_visibility_gate = std.atomic.Value(bool).init(false);
+
+const ReservedBatchWrite = struct {
+    write: internal_batch_plan.PlannedWrite,
+    target: union(enum) {
+        overwrite_leaf: struct {
+            leaf: *art_node.Leaf,
+            value: *types.Value,
+        },
+        prepared: struct {
+            prepared: art.PreparedInsert,
+            reserved: art.ReservedInsert,
+        },
+    },
 };
 
-/// Releases any prepared batch values and keys that were not transferred into runtime state.
-///
-/// Time Complexity: O(n + v), where `n` is `prepared.len` and `v` is total teardown work for any uncommitted prepared values.
-///
-/// Allocator: Does not allocate; frees uncommitted prepared keys and values through `allocator`.
-fn cleanup_prepared_writes(prepared: []PreparedWrite, allocator: std.mem.Allocator) void {
-    for (prepared) |write| {
-        if (write.transferred) continue;
-        if (write.owned_insert_key) |owned_key| allocator.free(owned_key);
-        var owned_value = write.new_value;
-        owned_value.deinit(allocator);
-    }
-}
+const ReservedShard = struct {
+    committed: ?*runtime_shard.CommittedArena,
+    writes: []ReservedBatchWrite,
 
-/// Translates low-level planner errors into the public engine batch error surface.
-///
-/// Time Complexity: O(1).
-///
-/// Allocator: Does not allocate.
+    fn deinit(self: *ReservedShard, allocator: std.mem.Allocator) void {
+        if (self.committed) |committed| {
+            committed.arena.deinit();
+            allocator.destroy(committed);
+            self.committed = null;
+        }
+        self.* = undefined;
+    }
+};
+
 fn translate_plan_error(err: anyerror) error_mod.EngineError {
     return switch (err) {
         error.EmptyKey, error.KeyTooLarge => error.KeyTooLarge,
@@ -52,16 +61,11 @@ fn translate_plan_error(err: anyerror) error_mod.EngineError {
     };
 }
 
-/// Validates one checked-batch guard at the same physical boundary used for writes.
-///
-/// Time Complexity: O(k + v), where `k` is the guarded key length and `v` is serialized expected-value size for `key_value_equals`.
-///
-/// Allocator: Uses `scratch` only for temporary serialization measurement.
 fn validate_guard(
     allocator: std.mem.Allocator,
     scratch: *std.ArrayList(u8),
     guard: types.CheckedBatchGuard,
-) (internal_batch_plan.BatchPlanError)!void {
+) internal_batch_plan.BatchPlanError!void {
     switch (guard) {
         .key_exists => |key| try internal_mutate.validate_key(key),
         .key_not_exists => |key| try internal_mutate.validate_key(key),
@@ -74,15 +78,10 @@ fn validate_guard(
     }
 }
 
-/// Validates all checked-batch guards before the batch enters the apply window.
-///
-/// Time Complexity: O(g + b), where `g` is `guards.len` and `b` is total serialized expected-value bytes for `key_value_equals` guards.
-///
-/// Allocator: Uses `allocator` only for temporary serialization scratch growth.
 fn validate_guards(
     allocator: std.mem.Allocator,
     guards: []const types.CheckedBatchGuard,
-) (internal_batch_plan.BatchPlanError)!void {
+) internal_batch_plan.BatchPlanError!void {
     var scratch = std.ArrayList(u8).empty;
     defer scratch.deinit(allocator);
 
@@ -91,30 +90,20 @@ fn validate_guards(
     }
 }
 
-/// Returns whether one checked-batch guard holds against the current pre-batch state.
-///
-/// Time Complexity: O(k + v), where `k` is the guarded key length and `v` is compared value tree size for `key_value_equals`.
-///
-/// Allocator: Does not allocate.
-///
-/// Thread Safety: Requires the caller to hold the exclusive side of the visibility gate for the full guard-evaluation window.
 fn guard_holds(state: *runtime_state.DatabaseState, guard: types.CheckedBatchGuard, now: i64) bool {
     return switch (guard) {
         .key_exists => |key| blk: {
-            const shard_idx = runtime_shard.get_shard_index(key);
-            const shard = &state.shards[shard_idx];
+            const shard = &state.shards[runtime_shard.get_shard_index(key)];
             if (!internal_mutate.key_exists_unlocked(shard, key)) break :blk false;
             break :blk expiration.key_is_visible_unlocked(shard, key, now);
         },
         .key_not_exists => |key| blk: {
-            const shard_idx = runtime_shard.get_shard_index(key);
-            const shard = &state.shards[shard_idx];
+            const shard = &state.shards[runtime_shard.get_shard_index(key)];
             if (!internal_mutate.key_exists_unlocked(shard, key)) break :blk true;
             break :blk !expiration.key_is_visible_unlocked(shard, key, now);
         },
         .key_value_equals => |guarded| blk: {
-            const shard_idx = runtime_shard.get_shard_index(guarded.key);
-            const shard = &state.shards[shard_idx];
+            const shard = &state.shards[runtime_shard.get_shard_index(guarded.key)];
             if (!internal_mutate.key_exists_unlocked(shard, guarded.key)) break :blk false;
             if (!expiration.key_is_visible_unlocked(shard, guarded.key, now)) break :blk false;
             break :blk internal_mutate.stored_value_equals_unlocked(shard, guarded.key, guarded.value);
@@ -122,97 +111,234 @@ fn guard_holds(state: *runtime_state.DatabaseState, guard: types.CheckedBatchGua
     };
 }
 
-/// Applies one validated survivor plan under the exclusive visibility gate.
-///
-/// Time Complexity: O(g + n + v), where `g` is `guards.len`, `n` is `plan.writes.len`, and `v` is total cloned value size for prepared writes.
-///
-/// Allocator: Uses `allocator` for temporary prepared-write metadata and WAL batch views, and uses the engine base allocator for committed keys and values.
-///
-/// Ownership: Clones all surviving write values before making any mutation visible, then transfers prepared ownership into runtime state on success.
-///
-/// Thread Safety: Acquires the exclusive side of the global visibility gate for the full guard-check, reservation, WAL-append, and publish window.
+fn reserve_internal_node(allocator: std.mem.Allocator, node_type: art_node.NodeType) !art_node.ReservedInternalNode {
+    return switch (node_type) {
+        .node4 => .{ .node4 = try allocator.create(art_node.Node4) },
+        .node16 => .{ .node16 = try allocator.create(art_node.Node16) },
+        .node48 => .{ .node48 = try allocator.create(art_node.Node48) },
+        .node256 => .{ .node256 = try allocator.create(art_node.Node256) },
+    };
+}
+
+fn reserve_write(
+    allocator: std.mem.Allocator,
+    write: internal_batch_plan.PlannedWrite,
+    prepared: art.PreparedInsert,
+) !art.ReservedInsert {
+    const cloned_value = try allocator.create(types.Value);
+    cloned_value.* = try write.value.clone(allocator);
+
+    var reserved: art.ReservedInsert = .{
+        .value = cloned_value,
+    };
+
+    if (prepared.reservation.needs_stored_key) {
+        reserved.stored_key = try allocator.dupe(u8, write.key);
+    }
+    if (prepared.reservation.needs_leaf) {
+        const leaf = try allocator.create(art_node.Leaf);
+        leaf.* = .{
+            .key = reserved.stored_key.?,
+            .value = cloned_value,
+        };
+        reserved.leaf = leaf;
+    }
+    if (prepared.reservation.split_node_type) |node_type| {
+        reserved.split_node = try reserve_internal_node(allocator, node_type);
+    }
+    if (prepared.reservation.promoted_node_type) |node_type| {
+        reserved.promoted_node = try reserve_internal_node(allocator, node_type);
+    }
+
+    return reserved;
+}
+
+fn try_reserve_overwrite_group(
+    shard: *runtime_shard.Shard,
+    group: internal_batch_plan.ShardWriteGroup,
+    scratch_allocator: std.mem.Allocator,
+    reservation_allocator: std.mem.Allocator,
+    writes: []ReservedBatchWrite,
+) !bool {
+    std.debug.assert(writes.len == group.writes.len);
+    const leaves = try scratch_allocator.alloc(*art_node.Leaf, group.writes.len);
+    for (group.writes, 0..) |write, index| {
+        leaves[index] = shard.tree.find_leaf_for_exact_key(write.key) orelse return false;
+    }
+    for (group.writes, 0..) |write, index| {
+        const cloned_value = try reservation_allocator.create(types.Value);
+        cloned_value.* = try write.value.clone(reservation_allocator);
+        writes[index] = .{
+            .write = write,
+            .target = .{
+                .overwrite_leaf = .{
+                    .leaf = leaves[index],
+                    .value = cloned_value,
+                },
+            },
+        };
+    }
+    return true;
+}
+
+fn apply_reserved_write_or_panic(tree: *art.Tree, reserved_write: *const ReservedBatchWrite) void {
+    switch (reserved_write.target) {
+        .overwrite_leaf => |overwrite| {
+            overwrite.leaf.value = overwrite.value;
+        },
+        .prepared => |prepared_write| {
+            tree.apply_prepared_insert(&prepared_write.prepared, &prepared_write.reserved) catch |err| {
+                std.debug.panic("apply_batch prepared apply invariant failed: {s}", .{@errorName(err)});
+            };
+        },
+    }
+}
+
+fn append_plan_to_wal(
+    state: *runtime_state.DatabaseState,
+    allocator: std.mem.Allocator,
+    plan: *const internal_batch_plan.BatchPlan,
+) error_mod.EngineError!void {
+    if (plan.writes.len == 0) return;
+
+    const writes = try allocator.alloc(durability.PutBatchWrite, plan.writes.len);
+    defer allocator.free(writes);
+
+    var write_index: usize = 0;
+    for (plan.groups) |group| {
+        for (group.writes) |write| {
+            writes[write_index] = .{
+                .key = write.key,
+                .value = write.value,
+            };
+            write_index += 1;
+        }
+    }
+
+    try durability.append_put_batch_if_enabled(state, allocator, writes);
+}
+
+fn maybe_pause_after_visibility_gate() void {
+    if (!builtin.is_test) return;
+    if (!pause_after_visibility_gate.swap(false, .acq_rel)) return;
+
+    paused_at_visibility_gate.store(true, .release);
+    defer {
+        paused_at_visibility_gate.store(false, .release);
+        resume_after_visibility_gate.store(false, .release);
+    }
+
+    while (!resume_after_visibility_gate.load(.acquire)) {
+        std.Thread.sleep(100 * std.time.ns_per_us);
+    }
+}
+
 fn apply_plan(
     state: *runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
-    plan: *internal_batch_plan.BatchPlan,
+    plan: *const internal_batch_plan.BatchPlan,
     guards: []const types.CheckedBatchGuard,
 ) error_mod.EngineError!void {
     state.visibility_gate.lock_exclusive();
     defer state.visibility_gate.unlock_exclusive();
+    maybe_pause_after_visibility_gate();
 
     const now = runtime_shard.unix_now();
     for (guards) |guard| {
         if (!guard_holds(state, guard, now)) return error.GuardFailed;
     }
+    if (plan.writes.len == 0) return;
 
-    var prepared = try std.ArrayList(PreparedWrite).initCapacity(allocator, plan.writes.len);
-    defer cleanup_prepared_writes(prepared.items, state.base_allocator);
-    defer prepared.deinit(allocator);
+    var acquired: usize = 0;
+    var applied_count: u64 = 0;
+    errdefer _ = state.counters.ops_put_total.fetchAdd(applied_count, .monotonic);
+    defer {
+        while (acquired > 0) {
+            acquired -= 1;
+            state.shards[plan.groups[acquired].shard_idx].lock.unlock();
+        }
+    }
 
-    var new_inserts_per_shard: [runtime_state.NUM_SHARDS]usize = [_]usize{0} ** runtime_state.NUM_SHARDS;
+    for (plan.groups) |group| {
+        state.shards[group.shard_idx].lock.lock();
+        acquired += 1;
+    }
 
-    for (plan.writes) |write| {
-        const shard = &state.shards[write.shard_idx];
+    var scratch_arena = std.heap.ArenaAllocator.init(allocator);
+    defer scratch_arena.deinit();
+    var scratch_fallback = std.heap.stackFallback(PUT_BATCH_APPLY_STACK_BYTES, scratch_arena.allocator());
+    const scratch_allocator = scratch_fallback.get();
+    const reservations = try scratch_allocator.alloc(ReservedShard, plan.groups.len);
 
-        var prepared_write = PreparedWrite{
-            .shard_idx = write.shard_idx,
-            .key = write.key,
-            .owned_insert_key = null,
-            .new_value = try write.value.clone(state.base_allocator),
+    var initialized: usize = 0;
+    errdefer {
+        for (reservations[0..initialized]) |*reservation| reservation.deinit(state.base_allocator);
+    }
+
+    for (plan.groups, 0..) |group, index| {
+        const committed = try state.base_allocator.create(runtime_shard.CommittedArena);
+        errdefer state.base_allocator.destroy(committed);
+        committed.* = .{
+            .arena = std.heap.ArenaAllocator.init(state.base_allocator),
+            .next = null,
         };
-        errdefer {
-            if (prepared_write.owned_insert_key) |owned_key| state.base_allocator.free(owned_key);
-            prepared_write.new_value.deinit(state.base_allocator);
+        errdefer committed.arena.deinit();
+
+        reservations[index] = .{
+            .committed = committed,
+            .writes = try scratch_allocator.alloc(ReservedBatchWrite, group.writes.len),
+        };
+        initialized += 1;
+
+        const shard = &state.shards[group.shard_idx];
+        const reservation_allocator = committed.arena.allocator();
+
+        if (try try_reserve_overwrite_group(shard, group, scratch_allocator, reservation_allocator, reservations[index].writes)) {
+            continue;
         }
 
-        if (!internal_mutate.key_exists_unlocked(shard, write.key)) {
-            prepared_write.owned_insert_key = try state.base_allocator.dupe(u8, write.key);
-            new_inserts_per_shard[write.shard_idx] += 1;
+        var shadow = try shard.tree.build_shadow_tree(scratch_allocator);
+        var last_input_index: ?usize = null;
+        for (group.writes, 0..) |write, write_index| {
+            if (last_input_index) |prev_index| {
+                std.debug.assert(prev_index < write.input_index);
+            }
+            const prepared = try shard.tree.plan_prepared_insert(&shadow, scratch_allocator, write.key);
+            const reserved = try reserve_write(reservation_allocator, write, prepared);
+            reservations[index].writes[write_index] = .{
+                .write = write,
+                .target = .{
+                    .prepared = .{
+                        .prepared = prepared,
+                        .reserved = reserved,
+                    },
+                },
+            };
+            last_input_index = write.input_index;
         }
-
-        prepared.appendAssumeCapacity(prepared_write);
     }
 
-    for (new_inserts_per_shard, 0..) |count, shard_idx| {
-        if (count == 0) continue;
-        try state.shards[shard_idx].values.ensureUnusedCapacity(state.base_allocator, count);
+    try append_plan_to_wal(state, scratch_allocator, plan);
+
+    for (plan.groups, 0..) |group, index| {
+        const shard = &state.shards[group.shard_idx];
+        for (reservations[index].writes) |*reserved_write| {
+            apply_reserved_write_or_panic(&shard.tree, reserved_write);
+            internal_ttl_index.clear_ttl_entry(shard, reserved_write.write.key);
+        }
+        shard.append_committed_arena(reservations[index].committed.?);
+        reservations[index].committed = null;
+        applied_count += group.writes.len;
     }
 
-    const wal_writes = try allocator.alloc(durability.PutBatchWrite, plan.writes.len);
-    defer allocator.free(wal_writes);
-    for (plan.writes, 0..) |write, index| {
-        wal_writes[index] = .{
-            .key = write.key,
-            .value = write.value,
-        };
-    }
-
-    try durability.append_put_batch_if_enabled(state, allocator, wal_writes);
-
-    for (prepared.items) |*write| {
-        internal_mutate.apply_owned_put_assume_capacity_unlocked(
-            &state.shards[write.shard_idx],
-            state.base_allocator,
-            write.key,
-            write.owned_insert_key,
-            write.new_value,
-        );
-        internal_ttl_index.clear_ttl_entry(&state.shards[write.shard_idx], write.key);
-        write.transferred = true;
-    }
-
-    _ = state.counters.ops_put_total.fetchAdd(plan.writes.len, .monotonic);
+    _ = state.counters.ops_put_total.fetchAdd(applied_count, .monotonic);
 }
 
 /// Applies one plain atomic batch.
 ///
-/// Time Complexity: O(n + b + v), where `n` is `writes.len`, `b` is total serialized value bytes measured during planning, and `v` is total cloned value size for prepared writes.
+/// Time Complexity: O(s + n * (k + v)), where `s` is shard grouping and shadow-planning work, `n` is survivor write count, `k` is average key length, and `v` is value clone cost.
 ///
-/// Allocator: Uses `allocator` for planning scratch, temporary prepared-write metadata, and temporary WAL batch views, and uses the engine base allocator for batch-owned values committed to runtime state.
-///
-/// Ownership: Clones all surviving write values into engine-owned storage before making the batch visible.
-///
-/// Thread Safety: Acquires the exclusive side of the global visibility gate for the full guard-check and apply window.
+/// Allocator: Uses `allocator` for planner scratch, committed delta arenas, and temporary WAL batch views.
 pub fn apply_batch(
     state: *runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
@@ -225,13 +351,9 @@ pub fn apply_batch(
 
 /// Applies one checked batch after verifying all guards against the pre-batch state.
 ///
-/// Time Complexity: O(g + n + b + v), where `g` is `batch.guards.len`, `n` is surviving write count, `b` is total serialized value bytes measured during planning, and `v` is total cloned value size for prepared writes.
+/// Time Complexity: O(g + s + n * (k + v)), where `g` is guard count, `s` is shard grouping and shadow-planning work, `n` is survivor write count, `k` is average key length, and `v` is value clone cost.
 ///
-/// Allocator: Uses `allocator` for planning scratch, temporary prepared-write metadata, and temporary WAL batch views, and uses the engine base allocator for batch-owned values committed to runtime state.
-///
-/// Ownership: Clones all surviving write values into engine-owned storage before making the batch visible.
-///
-/// Thread Safety: Acquires the exclusive side of the global visibility gate for the full guard-check and apply window.
+/// Allocator: Uses `allocator` for validation scratch, planner scratch, committed delta arenas, and temporary WAL batch views.
 pub fn apply_checked_batch(
     state: *runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
@@ -242,3 +364,28 @@ pub fn apply_checked_batch(
     defer plan.deinit();
     return apply_plan(state, allocator, &plan, batch.guards);
 }
+
+pub const test_hooks = if (builtin.is_test) struct {
+    /// Arms a one-shot pause after the next batch apply acquires the global visibility gate.
+    ///
+    /// Time Complexity: O(1).
+    pub fn pause_next_batch_after_visibility_gate() void {
+        paused_at_visibility_gate.store(false, .release);
+        resume_after_visibility_gate.store(false, .release);
+        pause_after_visibility_gate.store(true, .release);
+    }
+
+    /// Returns whether a batch apply is currently paused behind the visibility gate hook.
+    ///
+    /// Time Complexity: O(1).
+    pub fn is_batch_paused_after_visibility_gate() bool {
+        return paused_at_visibility_gate.load(.acquire);
+    }
+
+    /// Releases a paused batch apply visibility-gate hook.
+    ///
+    /// Time Complexity: O(1).
+    pub fn resume_batch_after_visibility_gate() void {
+        resume_after_visibility_gate.store(true, .release);
+    }
+} else struct {};

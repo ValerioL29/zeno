@@ -59,7 +59,7 @@ pub const Database = struct {
 
     /// Reads one key from the engine contract surface.
     ///
-    /// Time Complexity: O(n^2 + k + v), where `n` is `key.len` for shard routing, `k` is hash-map lookup work, and `v` is cloned value size when the key exists.
+    /// Time Complexity: O(n + k + v), where `n` is `key.len` for shard routing, `k` is ART lookup work, and `v` is cloned value size when the key exists.
     ///
     /// Allocator: Allocates the returned cloned value through `allocator` when the key exists.
     ///
@@ -70,7 +70,7 @@ pub const Database = struct {
 
     /// Writes one plain key/value pair through the engine contract surface.
     ///
-    /// Time Complexity: O(n^2 + k + v), where `n` is `key.len` for shard routing, `k` is hash-map lookup or insert work, and `v` is cloned value size.
+    /// Time Complexity: O(n + k + v), where `n` is `key.len` for shard routing, `k` is ART lookup or insert work, and `v` is cloned value size.
     ///
     /// Allocator: Clones owned key and value storage through the engine base allocator.
     ///
@@ -83,7 +83,7 @@ pub const Database = struct {
 
     /// Deletes one plain key from the engine contract surface.
     ///
-    /// Time Complexity: O(n^2 + k), where `n` is `key.len` for shard routing and `k` is hash-map lookup and removal work.
+    /// Time Complexity: O(n + k), where `n` is `key.len` for shard routing and `k` is ART lookup and removal work.
     ///
     /// Allocator: Frees engine-owned key and value storage when the key exists and may allocate delegated WAL record scratch when durability is enabled.
     ///
@@ -94,7 +94,7 @@ pub const Database = struct {
 
     /// Sets or clears key expiration at an absolute unix-second timestamp.
     ///
-    /// Time Complexity: O(n^2 + k), where `n` is `key.len` for shard routing and `k` is shard-local lookup plus optional TTL metadata update work.
+    /// Time Complexity: O(n + k), where `n` is `key.len` for shard routing and `k` is shard-local lookup plus optional TTL metadata update work.
     ///
     /// Allocator: Uses the engine base allocator when inserting a new TTL entry and may allocate delegated WAL record scratch for durable live mutations.
     ///
@@ -105,7 +105,7 @@ pub const Database = struct {
 
     /// Returns Redis-style TTL for one plain key.
     ///
-    /// Time Complexity: O(n^2 + k), where `n` is `key.len` for shard routing and `k` is shard-local lookup plus optional expired-key cleanup work.
+    /// Time Complexity: O(n + k), where `n` is `key.len` for shard routing and `k` is shard-local lookup plus optional expired-key cleanup work.
     ///
     /// Allocator: Does not allocate.
     ///
@@ -217,7 +217,7 @@ fn has_stored_key_for_test(db: *Database, key: []const u8) bool {
 
     shard.lock.lockShared();
     defer shard.lock.unlockShared();
-    return shard.values.contains(key);
+    return shard.tree.lookup(key) != null;
 }
 
 fn expire_at_boundary(db: *Database, key: []const u8, unix_seconds: ?i64) EngineError!bool {
@@ -1679,6 +1679,34 @@ test "scan_prefix_from_in_view paginates in key order" {
     try testing.expectEqual(@as(usize, 1), second_page.entries.items.len);
     try testing.expect(second_page.borrow_next_cursor() == null);
     try testing.expectEqualStrings("alpha:2", second_page.entries.items[0].key);
+}
+
+test "scan_prefix_from_in_view cursor records the real shard index of the last emitted key" {
+    const testing = std.testing;
+
+    const primary_key = blk: {
+        if (runtime_shard.get_shard_index("alpha") != 0) break :blk "alpha";
+        if (runtime_shard.get_shard_index("beta") != 0) break :blk "beta";
+        if (runtime_shard.get_shard_index("gamma") != 0) break :blk "gamma";
+        unreachable;
+    };
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const one = types.Value{ .integer = 1 };
+    const two = types.Value{ .integer = 2 };
+    try db.put(primary_key, &one);
+    try db.put("zz-after", &two);
+
+    var view = try db.read_view();
+    defer view.deinit();
+
+    var page = try scan_prefix_from_in_view(&view, testing.allocator, "", null, 1);
+    defer page.deinit();
+
+    const cursor = page.borrow_next_cursor().?;
+    try testing.expectEqual(runtime_shard.get_shard_index(page.entries.items[0].key), cursor.shard_idx);
 }
 
 test "scan_prefix_from_in_view omits keys expired before the view opens" {

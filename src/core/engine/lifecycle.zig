@@ -230,7 +230,7 @@ fn load_snapshot_for_open(
 ///
 /// Time Complexity: O(s + n), where `s` is the runtime shard count and `n` is total retained shard teardown work.
 ///
-/// Allocator: Does not allocate; releases current shard-owned storage, then reconstructs empty shard state using `state.base_allocator`.
+/// Allocator: Does not allocate; releases current shard-owned storage while retaining shard arena capacity for the reconstructed ART-empty state.
 ///
 /// Thread Safety: Not thread-safe; recovery owns the runtime state exclusively before the engine handle is published.
 fn reset_runtime_shards_for_recovery(state: *DatabaseState) void {
@@ -266,7 +266,7 @@ fn purge_expired_after_recovery(state: *DatabaseState) !void {
         }
 
         for (expired_keys.items) |key| {
-            _ = internal_mutate.remove_stored_value_unlocked(shard, state.base_allocator, key);
+            _ = try internal_mutate.remove_stored_value_unlocked(shard, key);
             internal_ttl_index.clear_ttl_entry(shard, key);
         }
     }
@@ -274,9 +274,9 @@ fn purge_expired_after_recovery(state: *DatabaseState) !void {
 
 /// Applies one replayed `PUT` mutation into runtime state while WAL open still owns recovery.
 ///
-/// Time Complexity: O(n^2 + k + v), where `n` is `key.len` for shard routing, `k` is hash-map lookup or insert work, and `v` is cloned value size.
+/// Time Complexity: O(n + k + v), where `n` is `key.len` for shard routing, `k` is ART insert or overwrite work, and `v` is cloned value size.
 ///
-/// Allocator: Clones owned key and value storage through `db.state.base_allocator`.
+/// Allocator: Clones owned key and value storage through the target shard arena.
 ///
 /// Ownership: Clones `value` into runtime-owned storage before returning.
 ///
@@ -289,39 +289,15 @@ fn replay_put(ctx: *anyopaque, key: []const u8, value: *const Value) !void {
     shard.lock.lock();
     defer shard.lock.unlock();
 
-    const allocator = db.state.base_allocator;
-    if (shard.values.getPtr(key)) |stored| {
-        const cloned = try value.clone(allocator);
-        errdefer {
-            var owned_value = cloned;
-            owned_value.deinit(allocator);
-        }
-
-        stored.deinit(allocator);
-        stored.* = cloned;
-    } else {
-        try shard.values.ensureUnusedCapacity(allocator, 1);
-
-        const owned_key = try allocator.dupe(u8, key);
-        errdefer allocator.free(owned_key);
-
-        const cloned = try value.clone(allocator);
-        errdefer {
-            var owned_value = cloned;
-            owned_value.deinit(allocator);
-        }
-
-        shard.values.putAssumeCapacityNoClobber(owned_key, cloned);
-    }
-
+    try internal_mutate.upsert_value_unlocked(shard, key, value);
     internal_ttl_index.clear_ttl_entry(shard, key);
 }
 
 /// Applies one replayed `DELETE` mutation into runtime state while WAL open still owns recovery.
 ///
-/// Time Complexity: O(n^2 + k), where `n` is `key.len` for shard routing and `k` is hash-map removal work.
+/// Time Complexity: O(n + k), where `n` is `key.len` for shard routing and `k` is ART delete work.
 ///
-/// Allocator: Does not allocate; frees runtime-owned key and value storage when the key exists.
+/// Allocator: Does not allocate directly; removal retains replaced storage inside the shard arena model.
 ///
 /// Thread Safety: Replay runs before the WAL handle is shared; this helper acquires one shard-exclusive lock for the targeted key.
 fn replay_delete(ctx: *anyopaque, key: []const u8) !void {
@@ -332,13 +308,13 @@ fn replay_delete(ctx: *anyopaque, key: []const u8) !void {
     shard.lock.lock();
     defer shard.lock.unlock();
 
-    _ = internal_mutate.remove_stored_value_unlocked(shard, db.state.base_allocator, key);
+    _ = try internal_mutate.remove_stored_value_unlocked(shard, key);
     internal_ttl_index.clear_ttl_entry(shard, key);
 }
 
 /// Applies one replayed `EXPIRE` mutation into runtime state while WAL open still owns recovery.
 ///
-/// Time Complexity: O(n^2 + k), where `n` is `key.len` for shard routing and `k` is shard-local lookup plus optional TTL metadata update work.
+/// Time Complexity: O(n + k), where `n` is `key.len` for shard routing and `k` is shard-local ART lookup plus optional TTL metadata update work.
 ///
 /// Allocator: Uses `db.state.base_allocator` only when inserting a new TTL entry.
 ///
@@ -351,7 +327,7 @@ fn replay_expire(ctx: *anyopaque, key: []const u8, expire_at_sec: i64) !void {
     shard.lock.lock();
     defer shard.lock.unlock();
 
-    if (!shard.values.contains(key)) {
+    if (!internal_mutate.key_exists_unlocked(shard, key)) {
         internal_ttl_index.clear_ttl_entry(shard, key);
         return;
     }

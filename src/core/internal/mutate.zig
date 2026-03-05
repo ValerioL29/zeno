@@ -29,7 +29,7 @@ pub fn validate_key(key: []const u8) MutationError!void {
 ///
 /// Allocator: Does not allocate.
 pub fn key_exists_unlocked(shard: *const runtime_shard.Shard, key: []const u8) bool {
-    return shard.values.contains(key);
+    return shard.tree.lookup(key) != null;
 }
 
 /// Clones one stored value from shard-owned plain storage when present.
@@ -44,7 +44,7 @@ pub fn clone_stored_value_unlocked(
     allocator: std.mem.Allocator,
     key: []const u8,
 ) !?types.Value {
-    const stored = shard.values.getPtr(key) orelse return null;
+    const stored = shard.tree.lookup(key) orelse return null;
     return try stored.clone(allocator);
 }
 
@@ -58,50 +58,39 @@ pub fn stored_value_equals_unlocked(
     key: []const u8,
     expected: *const types.Value,
 ) bool {
-    const stored = shard.values.getPtr(key) orelse return false;
+    const stored = shard.tree.lookup(key) orelse return false;
     return values_equal(stored, expected);
 }
 
-/// Applies one already-owned value into shard storage after capacity has been reserved.
+/// Clones one key and value into shard-owned ART storage, inserting or replacing the live entry.
 ///
-/// Time Complexity: O(k + v), where `k` is `key.len` and `v` is teardown cost for any replaced stored value.
+/// Time Complexity: O(k + v), where `k` is `key.len` and `v` is deep-clone work for `value`.
 ///
-/// Allocator: Does not allocate; assumes any required hash-map capacity has already been reserved.
+/// Allocator: Uses the shard arena allocator for duplicated key bytes, value storage, and nested cloned payloads.
 ///
-/// Ownership: Transfers ownership of `owned_insert_key` and `value` into shard storage on insert, or of `value` alone on replace.
-pub fn apply_owned_put_assume_capacity_unlocked(
+/// Ownership: Clones `value` into shard-owned storage and retains replaced storage inside the shard arena model.
+pub fn upsert_value_unlocked(
     shard: *runtime_shard.Shard,
-    allocator: std.mem.Allocator,
     key: []const u8,
-    owned_insert_key: ?[]u8,
-    value: types.Value,
-) void {
-    if (shard.values.getPtr(key)) |stored| {
-        stored.deinit(allocator);
-        stored.* = value;
-        return;
-    }
-
-    std.debug.assert(owned_insert_key != null);
-    shard.values.putAssumeCapacityNoClobber(owned_insert_key.?, value);
+    value: *const types.Value,
+) !void {
+    const arena_allocator = shard.arena.allocator();
+    const cloned_value = try arena_allocator.create(types.Value);
+    cloned_value.* = try value.clone(arena_allocator);
+    const cloned_key = try arena_allocator.dupe(u8, key);
+    try shard.tree.insert(cloned_key, cloned_value);
 }
 
 /// Removes one stored key/value pair when present.
 ///
 /// Time Complexity: O(k + v), where `k` is `key.len` and `v` is teardown cost for the removed value.
 ///
-/// Allocator: Does not allocate; frees owned key and nested value storage through `allocator`.
+/// Allocator: Does not allocate directly; any ART restructuring uses the tree allocator.
 pub fn remove_stored_value_unlocked(
     shard: *runtime_shard.Shard,
-    allocator: std.mem.Allocator,
     key: []const u8,
-) bool {
-    const removed = shard.values.fetchRemove(key) orelse return false;
-    allocator.free(removed.key);
-
-    var owned_value = removed.value;
-    owned_value.deinit(allocator);
-    return true;
+) !bool {
+    return shard.tree.delete(key);
 }
 
 /// Returns whether two values are physically equal by full content.

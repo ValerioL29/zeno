@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const codec = @import("../internal/codec.zig");
+const art = @import("../index/art/tree.zig");
 const runtime_shard = @import("../runtime/shard.zig");
 const runtime_state = @import("../runtime/state.zig");
 const Value = @import("../types/value.zig").Value;
@@ -18,12 +19,6 @@ const VERSION: u32 = 2;
 /// Minimum valid snapshot size: magic, version, checkpoint LSN, shard count, and CRC trailer.
 const MIN_SNAPSHOT_SIZE: usize = 24;
 
-/// One borrowed key/value entry collected from a shard for deterministic serialization.
-const BorrowedValueEntry = struct {
-    key: []const u8,
-    value: *const Value,
-};
-
 /// One borrowed TTL entry collected from a shard for deterministic serialization.
 const BorrowedTtlEntry = struct {
     key: []const u8,
@@ -33,27 +28,22 @@ const BorrowedTtlEntry = struct {
 /// One temporary loaded shard populated before atomic publish into runtime state.
 const LoadedShard = struct {
     base_allocator: std.mem.Allocator,
-    values: std.StringHashMapUnmanaged(Value) = .{},
+    arena: std.heap.ArenaAllocator,
     ttl_index: std.StringHashMapUnmanaged(i64) = .{},
+    tree: art.Tree,
 
     /// Releases all loaded shard storage that has not been published.
     ///
-    /// Time Complexity: O(n + t + b), where `n` is value count, `t` is TTL count, and `b` is nested value teardown work.
+    /// Time Complexity: O(t), where `t` is TTL count.
     ///
-    /// Allocator: Does not allocate; frees keys, values, and TTL metadata through `base_allocator`.
+    /// Allocator: Does not allocate; frees TTL metadata and tears down arena-owned ART storage through `base_allocator`.
     fn deinit(self: *LoadedShard) void {
         var ttl_iterator = self.ttl_index.iterator();
         while (ttl_iterator.next()) |entry| {
             self.base_allocator.free(entry.key_ptr.*);
         }
         self.ttl_index.deinit(self.base_allocator);
-
-        var value_iterator = self.values.iterator();
-        while (value_iterator.next()) |entry| {
-            self.base_allocator.free(entry.key_ptr.*);
-            entry.value_ptr.deinit(self.base_allocator);
-        }
-        self.values.deinit(self.base_allocator);
+        self.arena.deinit();
         self.* = undefined;
     }
 };
@@ -221,7 +211,11 @@ pub fn load(
     for (0..state.shards.len) |index| {
         loaded_shards[index] = .{
             .base_allocator = state.base_allocator,
+            .arena = std.heap.ArenaAllocator.init(state.base_allocator),
+            .ttl_index = .{},
+            .tree = undefined,
         };
+        loaded_shards[index].tree = art.Tree.init(loaded_shards[index].arena.allocator());
         loaded_initialized += 1;
     }
 
@@ -231,10 +225,9 @@ pub fn load(
 
     var value_buf = std.ArrayList(u8).init(allocator);
     defer value_buf.deinit();
-    var ttl_key_buf = std.ArrayList(u8).init(allocator);
-    defer ttl_key_buf.deinit();
 
     var total_records: usize = 0;
+    const now = runtime_shard.unix_now();
 
     for (0..shard_count) |_| {
         const shard_idx_u32 = read_u32_le(reader) catch return error.SnapshotCorrupted;
@@ -245,14 +238,14 @@ pub fn load(
 
         const record_count = read_u32_le(reader) catch return error.SnapshotCorrupted;
         var loaded_shard = &loaded_shards[shard_idx];
+        const shard_allocator = loaded_shard.arena.allocator();
 
         for (0..record_count) |_| {
             const key_len = read_u16_le(reader) catch return error.SnapshotCorrupted;
             if (key_len > codec.MAX_KEY_LEN) return error.SnapshotCorrupted;
 
-            const owned_key = try state.base_allocator.alloc(u8, key_len);
-            errdefer state.base_allocator.free(owned_key);
-            reader.readNoEof(owned_key) catch return error.SnapshotCorrupted;
+            const key = try shard_allocator.alloc(u8, key_len);
+            reader.readNoEof(key) catch return error.SnapshotCorrupted;
 
             const value_len = read_u32_le(reader) catch return error.SnapshotCorrupted;
             if (value_len > codec.MAX_VAL_LEN) return error.SnapshotCorrupted;
@@ -261,13 +254,13 @@ pub fn load(
             reader.readNoEof(value_buf.items) catch return error.SnapshotCorrupted;
 
             var value_stream = std.io.fixedBufferStream(value_buf.items);
-            var decoded = codec.deserialize_value(value_stream.reader(), state.base_allocator, 0) catch return error.SnapshotCorrupted;
-            errdefer decoded.deinit(state.base_allocator);
+            const decoded = codec.deserialize_value(value_stream.reader(), shard_allocator, 0) catch return error.SnapshotCorrupted;
             if (value_stream.pos != value_buf.items.len) return error.SnapshotCorrupted;
+            if (loaded_shard.tree.lookup(key) != null) return error.SnapshotCorrupted;
 
-            const gop = try loaded_shard.values.getOrPut(state.base_allocator, owned_key);
-            if (gop.found_existing) return error.SnapshotCorrupted;
-            gop.value_ptr.* = decoded;
+            const value_ptr = try shard_allocator.create(Value);
+            value_ptr.* = decoded;
+            try loaded_shard.tree.insert(key, value_ptr);
             total_records += 1;
         }
 
@@ -277,14 +270,19 @@ pub fn load(
                 const key_len = read_u16_le(reader) catch return error.SnapshotCorrupted;
                 if (key_len > codec.MAX_KEY_LEN) return error.SnapshotCorrupted;
 
-                try ttl_key_buf.resize(key_len);
-                reader.readNoEof(ttl_key_buf.items) catch return error.SnapshotCorrupted;
+                const key = try allocator.alloc(u8, key_len);
+                defer allocator.free(key);
+                reader.readNoEof(key) catch return error.SnapshotCorrupted;
 
                 const expire_at: i64 = @bitCast(read_u64_le(reader) catch return error.SnapshotCorrupted);
-                if (!loaded_shard.values.contains(ttl_key_buf.items)) continue;
-                if (loaded_shard.ttl_index.contains(ttl_key_buf.items)) return error.SnapshotCorrupted;
+                if (expire_at <= now) {
+                    _ = try loaded_shard.tree.delete(key);
+                    continue;
+                }
+                if (loaded_shard.tree.lookup(key) == null) continue;
+                if (loaded_shard.ttl_index.contains(key)) return error.SnapshotCorrupted;
 
-                const owned_ttl_key = try state.base_allocator.dupe(u8, ttl_key_buf.items);
+                const owned_ttl_key = try state.base_allocator.dupe(u8, key);
                 errdefer state.base_allocator.free(owned_ttl_key);
                 try loaded_shard.ttl_index.put(state.base_allocator, owned_ttl_key, expire_at);
             }
@@ -297,11 +295,11 @@ pub fn load(
         live_shard.lock.lock();
         defer live_shard.lock.unlock();
 
-        live_shard.clear_unlocked();
-        live_shard.values = loaded_shards[index].values;
-        live_shard.ttl_index = loaded_shards[index].ttl_index;
-        loaded_shards[index].values = .{};
-        loaded_shards[index].ttl_index = .{};
+        live_shard.replace_storage_unlocked(
+            loaded_shards[index].arena,
+            loaded_shards[index].ttl_index,
+            loaded_shards[index].tree,
+        );
     }
     committed = true;
 
@@ -382,25 +380,17 @@ fn write_one_shard_snapshot(
     shard.lock.lockShared();
     defer shard.lock.unlockShared();
 
-    const value_entries = try collect_sorted_value_entries(allocator, shard);
-    defer allocator.free(value_entries);
-
     try writer.writeU32Le(@intCast(shard_idx));
-    try writer.writeU32Le(@intCast(value_entries.len));
+    var dummy_ctx: u8 = 0;
+    const entry_count = try shard.tree.for_each(&dummy_ctx, noop_visit);
+    try writer.writeU32Le(@intCast(entry_count));
 
-    for (value_entries) |entry| {
-        std.debug.assert(entry.key.len <= codec.MAX_KEY_LEN);
-
-        try writer.writeU16Le(@intCast(entry.key.len));
-        try writer.writeAll(entry.key);
-
-        value_buf.clearRetainingCapacity();
-        try codec.serialize_value(allocator, entry.value, value_buf, 0);
-        std.debug.assert(value_buf.items.len <= codec.MAX_VAL_LEN);
-
-        try writer.writeU32Le(@intCast(value_buf.items.len));
-        try writer.writeAll(value_buf.items);
-    }
+    var write_ctx = EntryWriteCtx{
+        .allocator = allocator,
+        .writer = writer,
+        .value_buf = value_buf,
+    };
+    _ = try shard.tree.for_each(&write_ctx, write_entry_visit);
 
     if (version >= 2) {
         const ttl_entries = try collect_sorted_ttl_entries(allocator, shard);
@@ -415,28 +405,30 @@ fn write_one_shard_snapshot(
         }
     }
 
-    return value_entries.len;
+    return entry_count;
 }
 
-/// Collects one shard's values into a lexicographically sorted borrowed view.
-///
-/// Time Complexity: O(n log n), where `n` is the shard value count.
-///
-/// Allocator: Allocates the returned borrowed-entry slice with `allocator`.
-///
-/// Ownership: Returned entries borrow shard-owned keys and values and are valid only while the caller still holds the shard lock.
-fn collect_sorted_value_entries(allocator: std.mem.Allocator, shard: *const runtime_shard.Shard) ![]BorrowedValueEntry {
-    const entries = try allocator.alloc(BorrowedValueEntry, shard.values.count());
-    var index: usize = 0;
-    var iterator = shard.values.iterator();
-    while (iterator.next()) |entry| : (index += 1) {
-        entries[index] = .{
-            .key = entry.key_ptr.*,
-            .value = entry.value_ptr,
-        };
-    }
-    std.mem.sort(BorrowedValueEntry, entries, {}, borrowed_value_less_than);
-    return entries;
+fn noop_visit(_: *anyopaque, _: []const u8, _: *const Value) !void {}
+
+const EntryWriteCtx = struct {
+    allocator: std.mem.Allocator,
+    writer: *CrcFileWriter,
+    value_buf: *std.ArrayList(u8),
+};
+
+fn write_entry_visit(ctx_ptr: *anyopaque, key: []const u8, value: *const Value) !void {
+    const ctx: *EntryWriteCtx = @ptrCast(@alignCast(ctx_ptr));
+    std.debug.assert(key.len <= codec.MAX_KEY_LEN);
+
+    try ctx.writer.writeU16Le(@intCast(key.len));
+    try ctx.writer.writeAll(key);
+
+    ctx.value_buf.clearRetainingCapacity();
+    try codec.serialize_value(ctx.allocator, value, ctx.value_buf, 0);
+    std.debug.assert(ctx.value_buf.items.len <= codec.MAX_VAL_LEN);
+
+    try ctx.writer.writeU32Le(@intCast(ctx.value_buf.items.len));
+    try ctx.writer.writeAll(ctx.value_buf.items);
 }
 
 /// Collects one shard's TTL metadata into a lexicographically sorted borrowed view.
@@ -458,15 +450,6 @@ fn collect_sorted_ttl_entries(allocator: std.mem.Allocator, shard: *const runtim
     }
     std.mem.sort(BorrowedTtlEntry, entries, {}, borrowed_ttl_less_than);
     return entries;
-}
-
-/// Orders borrowed value entries lexicographically by key bytes.
-///
-/// Time Complexity: O(min(a, b)), where `a` and `b` are the compared key lengths.
-///
-/// Allocator: Does not allocate.
-fn borrowed_value_less_than(_: void, left: BorrowedValueEntry, right: BorrowedValueEntry) bool {
-    return std.mem.lessThan(u8, left.key, right.key);
 }
 
 /// Orders borrowed TTL entries lexicographically by key bytes.
@@ -515,16 +498,17 @@ fn read_u64_le(reader: anytype) !u64 {
 ///
 /// Time Complexity: O(k + v), where `k` is `key.len` and `v` is deep-clone work for `value`.
 ///
-/// Allocator: Uses `state.base_allocator` for the owned key, cloned value, and map growth.
+/// Allocator: Uses the target shard arena for the owned key and cloned value.
 fn put_test_value(state: *runtime_state.DatabaseState, key: []const u8, value: Value) !void {
     const shard_idx = runtime_shard.get_shard_index(key);
     const shard = &state.shards[shard_idx];
     shard.lock.lock();
     defer shard.lock.unlock();
 
-    const owned_key = try state.base_allocator.dupe(u8, key);
-    errdefer state.base_allocator.free(owned_key);
-    try shard.values.put(state.base_allocator, owned_key, value);
+    const shard_allocator = shard.arena.allocator();
+    const value_ptr = try shard_allocator.create(Value);
+    value_ptr.* = value;
+    try shard.tree.insert(try shard_allocator.dupe(u8, key), value_ptr);
 }
 
 /// Inserts one owned TTL entry into runtime state for snapshot tests.
@@ -622,9 +606,9 @@ test "snapshot write and load roundtrip values and ttl metadata" {
     try testing.expectEqual(@as(u64, 41), load_result.checkpoint_lsn);
     try testing.expectEqual(@as(usize, 3), load_result.records_loaded);
 
-    try testing.expectEqualStrings("hello", loaded.shards[runtime_shard.get_shard_index("alpha")].values.get("alpha").?.string);
-    try testing.expectEqual(@as(i64, 7), loaded.shards[runtime_shard.get_shard_index("{user:1}:beta")].values.get("{user:1}:beta").?.integer);
-    try testing.expect(loaded.shards[runtime_shard.get_shard_index("{user:2}:gamma")].values.get("{user:2}:gamma").?.boolean);
+    try testing.expectEqualStrings("hello", loaded.shards[runtime_shard.get_shard_index("alpha")].tree.lookup("alpha").?.string);
+    try testing.expectEqual(@as(i64, 7), loaded.shards[runtime_shard.get_shard_index("{user:1}:beta")].tree.lookup("{user:1}:beta").?.integer);
+    try testing.expect(loaded.shards[runtime_shard.get_shard_index("{user:2}:gamma")].tree.lookup("{user:2}:gamma").?.boolean);
     try testing.expectEqual(@as(?i64, source.shards[runtime_shard.get_shard_index("alpha")].ttl_index.get("alpha").?), loaded.shards[runtime_shard.get_shard_index("alpha")].ttl_index.get("alpha"));
     try testing.expectEqual(@as(?i64, source.shards[runtime_shard.get_shard_index("{user:2}:gamma")].ttl_index.get("{user:2}:gamma").?), loaded.shards[runtime_shard.get_shard_index("{user:2}:gamma")].ttl_index.get("{user:2}:gamma"));
 }
@@ -684,8 +668,8 @@ test "snapshot load supports version 1 files without ttl sections" {
     const result = try load(&loaded, testing.allocator, path);
     try testing.expectEqual(@as(u64, 17), result.checkpoint_lsn);
     try testing.expectEqual(@as(usize, 2), result.records_loaded);
-    try testing.expectEqual(@as(i64, 5), loaded.shards[runtime_shard.get_shard_index("alpha")].values.get("alpha").?.integer);
-    try testing.expectEqual(false, loaded.shards[runtime_shard.get_shard_index("beta")].values.get("beta").?.boolean);
+    try testing.expectEqual(@as(i64, 5), loaded.shards[runtime_shard.get_shard_index("alpha")].tree.lookup("alpha").?.integer);
+    try testing.expectEqual(false, loaded.shards[runtime_shard.get_shard_index("beta")].tree.lookup("beta").?.boolean);
     try testing.expect(loaded.shards[runtime_shard.get_shard_index("alpha")].ttl_index.get("alpha") == null);
 }
 
@@ -893,6 +877,65 @@ test "snapshot load rejects malformed lengths and truncated payloads" {
     try testing.expectError(error.SnapshotCorrupted, load(&state, testing.allocator, truncated_path));
 }
 
+test "snapshot load rejects duplicate value records within one shard" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/duplicate-value.snapshot", .{tmp.sub_path});
+    defer testing.allocator.free(path);
+
+    var source = runtime_state.DatabaseState.init(testing.allocator, null);
+    defer source.deinit();
+    try put_test_value(&source, "alpha", .{ .integer = 1 });
+    _ = try write(&source, testing.allocator, path, 1);
+
+    const bytes = try read_all_test(testing.allocator, path);
+    defer testing.allocator.free(bytes);
+
+    var payload = std.ArrayList(u8).init(testing.allocator);
+    defer payload.deinit();
+    try payload.appendSlice(testing.allocator, bytes[0 .. bytes.len - 4]);
+
+    var pos: usize = 16;
+    for (0..runtime_state.NUM_SHARDS) |_| {
+        pos += 4;
+        const value_count_offset = pos;
+        const value_count = std.mem.readInt(u32, bytes[pos..][0..4], .little);
+        pos += 4;
+        if (value_count > 0) {
+            const first_record_start = pos;
+            const key_len = std.mem.readInt(u16, bytes[pos..][0..2], .little);
+            pos += 2 + key_len;
+            const value_len = std.mem.readInt(u32, bytes[pos..][0..4], .little);
+            pos += 4 + value_len;
+            const first_record_len = pos - first_record_start;
+
+            std.mem.writeInt(u32, payload.items[value_count_offset .. value_count_offset + 4], value_count + 1, .little);
+
+            var rewritten = std.ArrayList(u8).init(testing.allocator);
+            defer rewritten.deinit();
+            try rewritten.appendSlice(testing.allocator, payload.items[0..pos]);
+            try rewritten.appendSlice(testing.allocator, payload.items[first_record_start .. first_record_start + first_record_len]);
+            try rewritten.appendSlice(testing.allocator, payload.items[pos..]);
+            try write_snapshot_payload_with_crc_test(path, rewritten.items);
+            break;
+        }
+
+        const ttl_count = std.mem.readInt(u32, bytes[pos..][0..4], .little);
+        pos += 4;
+        for (0..ttl_count) |_| {
+            const key_len = std.mem.readInt(u16, bytes[pos..][0..2], .little);
+            pos += 2 + key_len + 8;
+        }
+    }
+
+    var loaded = runtime_state.DatabaseState.init(testing.allocator, null);
+    defer loaded.deinit();
+    try testing.expectError(error.SnapshotCorrupted, load(&loaded, testing.allocator, path));
+}
+
 test "corrupted snapshot does not partially mutate existing state" {
     const testing = std.testing;
 
@@ -913,8 +956,38 @@ test "corrupted snapshot does not partially mutate existing state" {
     try put_test_value(&target, "sentinel", .{ .integer = 99 });
 
     try testing.expectError(error.SnapshotCorrupted, load(&target, testing.allocator, path));
-    try testing.expectEqual(@as(i64, 99), target.shards[runtime_shard.get_shard_index("sentinel")].values.get("sentinel").?.integer);
-    try testing.expect(target.shards[runtime_shard.get_shard_index("alpha")].values.get("alpha") == null);
+    try testing.expectEqual(@as(i64, 99), target.shards[runtime_shard.get_shard_index("sentinel")].tree.lookup("sentinel").?.integer);
+    try testing.expect(target.shards[runtime_shard.get_shard_index("alpha")].tree.lookup("alpha") == null);
+}
+
+test "snapshot load preserves shard lock usability after publishing replacement storage" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/lock-usable.snapshot", .{tmp.sub_path});
+    defer testing.allocator.free(path);
+
+    var source = runtime_state.DatabaseState.init(testing.allocator, null);
+    defer source.deinit();
+    try put_test_value(&source, "alpha", .{ .integer = 1 });
+    _ = try write(&source, testing.allocator, path, 1);
+
+    var loaded = runtime_state.DatabaseState.init(testing.allocator, null);
+    defer loaded.deinit();
+    _ = try load(&loaded, testing.allocator, path);
+
+    const shard = &loaded.shards[runtime_shard.get_shard_index("alpha")];
+
+    shard.lock.lockShared();
+    try testing.expectEqual(@as(i64, 1), shard.tree.lookup("alpha").?.integer);
+    shard.lock.unlockShared();
+
+    shard.lock.lock();
+    defer shard.lock.unlock();
+    shard.reset_unlocked();
+    try testing.expect(shard.tree.lookup("alpha") == null);
 }
 
 test "snapshot load ignores ttl entries for missing keys" {
@@ -936,7 +1009,7 @@ test "snapshot load ignores ttl entries for missing keys" {
     defer loaded.deinit();
     _ = try load(&loaded, testing.allocator, path);
 
-    try testing.expectEqual(@as(i64, 1), loaded.shards[runtime_shard.get_shard_index("alpha")].values.get("alpha").?.integer);
+    try testing.expectEqual(@as(i64, 1), loaded.shards[runtime_shard.get_shard_index("alpha")].tree.lookup("alpha").?.integer);
     try testing.expect(loaded.shards[runtime_shard.get_shard_index("ghost")].ttl_index.get("ghost") == null);
 }
 

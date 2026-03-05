@@ -1,5 +1,5 @@
 //! Expiration-semantics ownership boundary for TTL-visible behavior.
-//! Cost: O(k) over one routed key, where `k` is key length for shard routing plus shard-local hash-map work.
+//! Cost: O(k) over one routed key, where `k` is key length for shard routing plus shard-local ART and TTL work.
 //! Allocator: Uses the shard base allocator for TTL metadata ownership and may allocate delegated WAL serialization scratch for durable live mutations.
 
 const durability = @import("durability.zig");
@@ -36,7 +36,7 @@ pub fn is_expired(expire_at_seconds: i64, now: i64) bool {
 
 /// Sets or clears expiration for one plain key.
 ///
-/// Time Complexity: O(n^2 + k), where `n` is `key.len` for shard routing and `k` is hash-map lookup and update work.
+/// Time Complexity: O(n + k), where `n` is `key.len` for shard routing and `k` is ART lookup and TTL update work.
 ///
 /// Allocator: Uses the shard base allocator when preparing a new TTL entry and may allocate delegated WAL record scratch for durable live mutations.
 ///
@@ -56,14 +56,14 @@ pub fn expire_at(
     defer shard.lock.unlock();
 
     const now = runtime_shard.unix_now();
-    if (!shard.values.contains(key)) {
+    if (!internal_mutate.key_exists_unlocked(shard, key)) {
         internal_ttl_index.clear_ttl_entry(shard, key);
         return false;
     }
 
     if (internal_ttl_index.get_expire_at(shard, key)) |existing_expire_at| {
         if (is_expired(existing_expire_at, now)) {
-            _ = internal_mutate.remove_stored_value_unlocked(shard, state.base_allocator, key);
+            _ = try internal_mutate.remove_stored_value_unlocked(shard, key);
             internal_ttl_index.clear_ttl_entry(shard, key);
             return false;
         }
@@ -72,7 +72,7 @@ pub fn expire_at(
     if (unix_seconds) |expire_at_seconds| {
         if (expire_at_seconds <= now) {
             try durability.append_delete_if_enabled(state, key);
-            _ = internal_mutate.remove_stored_value_unlocked(shard, state.base_allocator, key);
+            _ = try internal_mutate.remove_stored_value_unlocked(shard, key);
             internal_ttl_index.clear_ttl_entry(shard, key);
             return true;
         }
@@ -85,7 +85,7 @@ pub fn expire_at(
         return true;
     }
 
-    const stored = shard.values.getPtr(key).?;
+    const stored = shard.tree.lookup(key).?;
     try durability.append_put_if_enabled(state, key, stored);
     internal_ttl_index.clear_ttl_entry(shard, key);
     return true;
@@ -93,7 +93,7 @@ pub fn expire_at(
 
 /// Tries to clean up stale TTL state without blocking behind active read views.
 ///
-/// Time Complexity: O(n^2 + k), where `n` is `key.len` for shard routing and `k` is shard-local lookup plus optional teardown work.
+/// Time Complexity: O(n + k), where `n` is `key.len` for shard routing and `k` is shard-local ART lookup plus optional teardown work.
 ///
 /// Allocator: Does not allocate.
 fn try_cleanup_if_possible(
@@ -114,10 +114,10 @@ fn try_cleanup_if_possible(
     switch (cleanup) {
         .none => {},
         .missing_key => {
-            if (!shard.values.contains(key)) internal_ttl_index.clear_ttl_entry(shard, key);
+            if (!internal_mutate.key_exists_unlocked(shard, key)) internal_ttl_index.clear_ttl_entry(shard, key);
         },
         .expired_key => {
-            if (!shard.values.contains(key)) {
+            if (!internal_mutate.key_exists_unlocked(shard, key)) {
                 internal_ttl_index.clear_ttl_entry(shard, key);
                 return;
             }
@@ -126,7 +126,7 @@ fn try_cleanup_if_possible(
             const stored_expire_at = internal_ttl_index.get_expire_at(shard, key) orelse return;
             if (!is_expired(stored_expire_at, now)) return;
 
-            _ = internal_mutate.remove_stored_value_unlocked(shard, state.base_allocator, key);
+            _ = internal_mutate.remove_stored_value_unlocked(shard, key) catch return;
             internal_ttl_index.clear_ttl_entry(shard, key);
         },
     }
@@ -134,7 +134,7 @@ fn try_cleanup_if_possible(
 
 /// Returns Redis-style TTL for one plain key.
 ///
-/// Time Complexity: O(n^2 + k), where `n` is `key.len` for shard routing and `k` is shard-local hash-map lookup and optional cleanup work.
+/// Time Complexity: O(n + k), where `n` is `key.len` for shard routing and `k` is shard-local ART lookup and optional cleanup work.
 ///
 /// Allocator: Does not allocate.
 ///
@@ -153,7 +153,7 @@ pub fn ttl(state: *runtime_state.DatabaseState, key: []const u8) error_mod.Engin
         shard.lock.lockShared();
         defer shard.lock.unlockShared();
 
-        if (!shard.values.contains(key)) {
+        if (!internal_mutate.key_exists_unlocked(shard, key)) {
             cleanup = .missing_key;
             break :blk @as(i64, -2);
         }
