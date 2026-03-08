@@ -38,5 +38,8 @@ pub fn build(b: *std.Build) void {
 
     const run_bench = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run zeno-core benchmarks");
+    if (b.args) |args| {
+        run_bench.addArgs(args);
+    }
     bench_step.dependOn(&run_bench.step);
 }

@@ -14,6 +14,7 @@ const scan_item_count: usize = 256;
 const batch_item_count: usize = 64;
 const batch_key_storage_bytes: usize = 32;
 
+var bench_metrics_config: types.MetricsConfig = types.default_metrics_config();
 var steady_put_db: ?*engine.Database = null;
 var steady_get_db: ?*engine.Database = null;
 var steady_scan_db: ?*engine.Database = null;
@@ -23,9 +24,23 @@ var steady_checked_batch_overwrite_db: ?*engine.Database = null;
 var steady_checked_batch_insert_db: ?*engine.Database = null;
 var steady_batch_insert_seed = std.atomic.Value(usize).init(0);
 var steady_checked_batch_insert_seed = std.atomic.Value(usize).init(0);
+
+const BenchCliConfig = struct {
+    run_all_metrics_modes: bool = false,
+    metrics_config: types.MetricsConfig = types.default_metrics_config(),
+};
+
+const default_sampled_latency_shift: u8 = 10;
+
+fn open_bench_db(allocator: std.mem.Allocator) !*engine.Database {
+    return engine.open(allocator, .{
+        .metrics = bench_metrics_config,
+    });
+}
+
 const PutFreshBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
-        const db = engine.create(allocator) catch unreachable;
+        const db = open_bench_db(allocator) catch unreachable;
         defer db.close() catch unreachable;
 
         const value = types.Value{ .integer = 1 };
@@ -44,7 +59,7 @@ const PutSteadyBenchmark = struct {
 
 const GetExistingBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
-        const db = engine.create(allocator) catch unreachable;
+        const db = open_bench_db(allocator) catch unreachable;
         defer db.close() catch unreachable;
 
         const value = types.Value{ .integer = 42 };
@@ -67,7 +82,7 @@ const GetExistingSteadyBenchmark = struct {
 
 const ScanPrefixBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
-        const db = engine.create(allocator) catch unreachable;
+        const db = open_bench_db(allocator) catch unreachable;
         defer db.close() catch unreachable;
 
         load_scan_fixture(db);
@@ -89,7 +104,7 @@ const ScanPrefixSteadyBenchmark = struct {
 
 const ApplyBatchBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
-        const db = engine.create(allocator) catch unreachable;
+        const db = open_bench_db(allocator) catch unreachable;
         defer db.close() catch unreachable;
 
         var values: [batch_item_count]types.Value = undefined;
@@ -135,7 +150,7 @@ const ApplyBatchSteadyInsertBenchmark = struct {
 
 const ApplyCheckedBatchBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
-        const db = engine.create(allocator) catch unreachable;
+        const db = open_bench_db(allocator) catch unreachable;
         defer db.close() catch unreachable;
 
         var values: [batch_item_count]types.Value = undefined;
@@ -193,6 +208,93 @@ pub fn main() !void {
     defer _ = gpa.deinit();
 
     const allocator = gpa.allocator();
+    var stdout_buffer: [4 * 1024]u8 = undefined;
+    var stdout = std.fs.File.stdout().writer(&stdout_buffer);
+    const cli_config = try parse_cli_config(allocator);
+
+    if (cli_config.run_all_metrics_modes) {
+        const configs = [_]types.MetricsConfig{
+            .{ .mode = .disabled },
+            .{ .mode = .counters_only },
+            .{
+                .mode = .sampled_latency,
+                .latency_sample_shift = cli_config.metrics_config.latency_sample_shift,
+            },
+            .{ .mode = .full },
+        };
+
+        for (configs, 0..) |config, index| {
+            if (index != 0) try stdout.interface.print("\n", .{});
+            try run_bench_suite(allocator, &stdout.interface, config);
+        }
+    } else {
+        try run_bench_suite(allocator, &stdout.interface, cli_config.metrics_config);
+    }
+
+    try stdout.interface.flush();
+}
+
+fn parse_cli_config(allocator: std.mem.Allocator) !BenchCliConfig {
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    var cli = BenchCliConfig{};
+    var saw_metrics_mode = false;
+    var saw_latency_sample_shift = false;
+
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--help")) {
+            print_usage();
+            std.process.exit(0);
+        }
+        if (std.mem.startsWith(u8, arg, "--metrics-mode=")) {
+            const value = arg["--metrics-mode=".len..];
+            if (std.mem.eql(u8, value, "all")) {
+                cli.run_all_metrics_modes = true;
+                saw_metrics_mode = true;
+                continue;
+            }
+            cli.metrics_config.mode = parse_metrics_mode(value) orelse return error.InvalidArgument;
+            saw_metrics_mode = true;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--latency-sample-shift=")) {
+            const value = arg["--latency-sample-shift=".len..];
+            cli.metrics_config.latency_sample_shift = std.fmt.parseUnsigned(u8, value, 10) catch return error.InvalidArgument;
+            saw_latency_sample_shift = true;
+            continue;
+        }
+        return error.InvalidArgument;
+    }
+
+    if (saw_metrics_mode and !saw_latency_sample_shift and (cli.run_all_metrics_modes or cli.metrics_config.mode == .sampled_latency)) {
+        cli.metrics_config.latency_sample_shift = default_sampled_latency_shift;
+    }
+
+    return cli;
+}
+
+fn parse_metrics_mode(raw: []const u8) ?types.MetricsMode {
+    if (std.mem.eql(u8, raw, "disabled")) return .disabled;
+    if (std.mem.eql(u8, raw, "counters_only")) return .counters_only;
+    if (std.mem.eql(u8, raw, "sampled_latency")) return .sampled_latency;
+    if (std.mem.eql(u8, raw, "full")) return .full;
+    return null;
+}
+
+fn print_usage() void {
+    std.debug.print(
+        \\usage: zeno-core-bench [--metrics-mode=disabled|counters_only|sampled_latency|full|all] [--latency-sample-shift=N]
+        \\
+    , .{});
+}
+
+fn run_bench_suite(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    metrics_config: types.MetricsConfig,
+) !void {
+    bench_metrics_config = metrics_config;
     try init_steady_state_benches();
     defer deinit_steady_state_benches();
 
@@ -235,13 +337,25 @@ pub fn main() !void {
     try growing_bench.addParam("batch64 growing insert", &apply_batch_steady_insert, .{});
     try growing_bench.addParam("checked64 growing insert", &apply_checked_batch_steady_insert, .{});
 
-    var stdout_buffer: [4 * 1024]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&stdout_buffer);
-    try stable_bench.run(&stdout.interface);
-    try stdout.interface.print("\n", .{});
-    try stdout.interface.print("growing workloads\n", .{});
-    try growing_bench.run(&stdout.interface);
-    try stdout.interface.flush();
+    try print_metrics_config(writer, metrics_config);
+    try stable_bench.run(writer);
+    try writer.print("\n", .{});
+    try writer.print("growing workloads\n", .{});
+    try growing_bench.run(writer);
+}
+
+fn print_metrics_config(writer: anytype, metrics_config: types.MetricsConfig) !void {
+    switch (metrics_config.mode) {
+        .sampled_latency => {
+            try writer.print(
+                "metrics mode: {s} (latency_sample_shift={d})\n",
+                .{ @tagName(metrics_config.mode), metrics_config.latency_sample_shift },
+            );
+        },
+        else => {
+            try writer.print("metrics mode: {s}\n", .{@tagName(metrics_config.mode)});
+        },
+    }
 }
 
 fn load_scan_fixture(db: *engine.Database) void {
@@ -254,31 +368,31 @@ fn load_scan_fixture(db: *engine.Database) void {
 }
 
 fn init_steady_state_benches() !void {
-    steady_put_db = try engine.create(std.heap.page_allocator);
+    steady_put_db = try open_bench_db(std.heap.page_allocator);
     {
         const value = types.Value{ .integer = 1 };
         try steady_put_db.?.put("bench:put", &value);
     }
 
-    steady_get_db = try engine.create(std.heap.page_allocator);
+    steady_get_db = try open_bench_db(std.heap.page_allocator);
     {
         const value = types.Value{ .integer = 42 };
         try steady_get_db.?.put("bench:get", &value);
     }
 
-    steady_scan_db = try engine.create(std.heap.page_allocator);
+    steady_scan_db = try open_bench_db(std.heap.page_allocator);
     load_scan_fixture(steady_scan_db.?);
 
-    steady_batch_overwrite_db = try engine.create(std.heap.page_allocator);
+    steady_batch_overwrite_db = try open_bench_db(std.heap.page_allocator);
     prime_batch_fixture(steady_batch_overwrite_db.?, "batch");
 
-    steady_batch_insert_db = try engine.create(std.heap.page_allocator);
+    steady_batch_insert_db = try open_bench_db(std.heap.page_allocator);
     steady_batch_insert_seed.store(0, .monotonic);
 
-    steady_checked_batch_overwrite_db = try engine.create(std.heap.page_allocator);
+    steady_checked_batch_overwrite_db = try open_bench_db(std.heap.page_allocator);
     prime_batch_fixture(steady_checked_batch_overwrite_db.?, "guard");
 
-    steady_checked_batch_insert_db = try engine.create(std.heap.page_allocator);
+    steady_checked_batch_insert_db = try open_bench_db(std.heap.page_allocator);
     steady_checked_batch_insert_seed.store(0, .monotonic);
 }
 
