@@ -9,6 +9,7 @@ const zeno_core = @import("zeno_core");
 const engine = zeno_core.public;
 const official = zeno_core.official;
 const types = zeno_core.types;
+const FailingAllocator = std.testing.FailingAllocator;
 
 const scan_item_count: usize = 256;
 const scan_large_item_count: usize = 4096;
@@ -32,10 +33,25 @@ var steady_checked_batch_insert_seed = std.atomic.Value(usize).init(0);
 
 const BenchCliConfig = struct {
     run_all_metrics_modes: bool = false,
+    scan_allocation_profile: bool = false,
     metrics_config: types.MetricsConfig = types.default_metrics_config(),
 };
 
 const default_sampled_latency_shift: u8 = 10;
+
+const ScanProfileMode = enum {
+    public_full,
+    in_view_page,
+};
+
+const ScanAllocationProfile = struct {
+    emitted_entries: usize,
+    has_next_cursor: bool,
+    allocations: usize,
+    deallocations: usize,
+    allocated_bytes: usize,
+    freed_bytes: usize,
+};
 
 fn open_bench_db(allocator: std.mem.Allocator) !*engine.Database {
     return engine.open(allocator, .{
@@ -244,7 +260,9 @@ pub fn main() !void {
     var stdout = std.fs.File.stdout().writer(&stdout_buffer);
     const cli_config = try parse_cli_config(allocator);
 
-    if (cli_config.run_all_metrics_modes) {
+    if (cli_config.scan_allocation_profile) {
+        try run_scan_allocation_profile(&stdout.interface, cli_config.metrics_config);
+    } else if (cli_config.run_all_metrics_modes) {
         const configs = [_]types.MetricsConfig{
             .{ .mode = .disabled },
             .{ .mode = .counters_only },
@@ -296,6 +314,10 @@ fn parse_cli_config(allocator: std.mem.Allocator) !BenchCliConfig {
             saw_latency_sample_shift = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--scan-allocation-profile")) {
+            cli.scan_allocation_profile = true;
+            continue;
+        }
         return error.InvalidArgument;
     }
 
@@ -316,9 +338,95 @@ fn parse_metrics_mode(raw: []const u8) ?types.MetricsMode {
 
 fn print_usage() void {
     std.debug.print(
-        \\usage: zeno-core-bench [--metrics-mode=disabled|counters_only|sampled_latency|full|all] [--latency-sample-shift=N]
+        \\usage: zeno-core-bench [--metrics-mode=disabled|counters_only|sampled_latency|full|all] [--latency-sample-shift=N] [--scan-allocation-profile]
         \\
     , .{});
+}
+
+fn run_scan_allocation_profile(writer: anytype, metrics_config: types.MetricsConfig) !void {
+    bench_metrics_config = metrics_config;
+    try print_metrics_config(writer, metrics_config);
+    try writer.print("scan allocation profile (prefix=\"scan:\", page_limit={d})\n", .{scan_page_item_count});
+
+    const scan256_full = try profile_scan_allocations(scan_item_count, .public_full);
+    try print_scan_allocation_profile(writer, "scan256 steady", scan256_full);
+
+    const scan256_in_view = try profile_scan_allocations(scan_item_count, .in_view_page);
+    try print_scan_allocation_profile(writer, "scan64 in-view steady", scan256_in_view);
+
+    const scan4096_full = try profile_scan_allocations(scan_large_item_count, .public_full);
+    try print_scan_allocation_profile(writer, "scan4096 steady", scan4096_full);
+
+    const scan4096_in_view = try profile_scan_allocations(scan_large_item_count, .in_view_page);
+    try print_scan_allocation_profile(writer, "scan64 in-view 4096 steady", scan4096_in_view);
+}
+
+fn print_scan_allocation_profile(
+    writer: anytype,
+    label: []const u8,
+    profile: ScanAllocationProfile,
+) !void {
+    try writer.print(
+        "{s}: entries={d} next_cursor={s} allocations={d} deallocations={d} allocated_bytes={d} freed_bytes={d}\n",
+        .{
+            label,
+            profile.emitted_entries,
+            if (profile.has_next_cursor) "yes" else "no",
+            profile.allocations,
+            profile.deallocations,
+            profile.allocated_bytes,
+            profile.freed_bytes,
+        },
+    );
+}
+
+fn profile_scan_allocations(
+    comptime fixture_items: usize,
+    mode: ScanProfileMode,
+) !ScanAllocationProfile {
+    var db_gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(db_gpa.deinit() == .ok);
+
+    const db = try open_bench_db(db_gpa.allocator());
+    defer db.close() catch unreachable;
+    load_scan_fixture(fixture_items, db);
+
+    var result_gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(result_gpa.deinit() == .ok);
+
+    var counting_state = FailingAllocator.init(result_gpa.allocator(), .{});
+    const counting_allocator = counting_state.allocator();
+
+    var emitted_entries: usize = 0;
+    var has_next_cursor = false;
+
+    switch (mode) {
+        .public_full => {
+            var result = try db.scan_prefix(counting_allocator, "scan:");
+            emitted_entries = result.entries.items.len;
+            result.deinit();
+        },
+        .in_view_page => {
+            var view = try db.read_view();
+            defer view.deinit();
+
+            var page = try official.scan_prefix_from_in_view(&view, counting_allocator, "scan:", null, scan_page_item_count);
+            emitted_entries = page.entries.items.len;
+            has_next_cursor = page.borrow_next_cursor() != null;
+            page.deinit();
+        },
+    }
+
+    std.debug.assert(counting_state.allocated_bytes == counting_state.freed_bytes);
+
+    return .{
+        .emitted_entries = emitted_entries,
+        .has_next_cursor = has_next_cursor,
+        .allocations = counting_state.allocations,
+        .deallocations = counting_state.deallocations,
+        .allocated_bytes = counting_state.allocated_bytes,
+        .freed_bytes = counting_state.freed_bytes,
+    };
 }
 
 fn run_bench_suite(
