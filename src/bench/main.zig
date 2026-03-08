@@ -11,6 +11,7 @@ const official = zeno_core.official;
 const types = zeno_core.types;
 
 const scan_item_count: usize = 256;
+const scan_page_item_count: usize = 64;
 const batch_item_count: usize = 64;
 const batch_key_storage_bytes: usize = 32;
 
@@ -18,6 +19,7 @@ var bench_metrics_config: types.MetricsConfig = types.default_metrics_config();
 var steady_put_db: ?*engine.Database = null;
 var steady_get_db: ?*engine.Database = null;
 var steady_scan_db: ?*engine.Database = null;
+var steady_scan_view: ?types.ReadView = null;
 var steady_batch_overwrite_db: ?*engine.Database = null;
 var steady_batch_insert_db: ?*engine.Database = null;
 var steady_checked_batch_overwrite_db: ?*engine.Database = null;
@@ -99,6 +101,15 @@ const ScanPrefixSteadyBenchmark = struct {
         var result = db.scan_prefix(allocator, "scan:") catch unreachable;
         defer result.deinit();
         std.mem.doNotOptimizeAway(result.entries.items.len);
+    }
+};
+
+const ScanPrefixInViewSteadyBenchmark = struct {
+    pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
+        const view = if (steady_scan_view) |*stored| stored else unreachable;
+        var page = official.scan_prefix_from_in_view(view, allocator, "scan:", null, scan_page_item_count) catch unreachable;
+        defer page.deinit();
+        std.mem.doNotOptimizeAway(page.entries.items.len);
     }
 };
 
@@ -316,6 +327,7 @@ fn run_bench_suite(
     const get_existing_steady = GetExistingSteadyBenchmark{};
     const scan_prefix = ScanPrefixBenchmark{};
     const scan_prefix_steady = ScanPrefixSteadyBenchmark{};
+    const scan_prefix_in_view_steady = ScanPrefixInViewSteadyBenchmark{};
     const apply_batch = ApplyBatchBenchmark{};
     const apply_batch_steady_overwrite = ApplyBatchSteadyOverwriteBenchmark{};
     const apply_batch_steady_insert = ApplyBatchSteadyInsertBenchmark{};
@@ -329,6 +341,7 @@ fn run_bench_suite(
     try stable_bench.addParam("get steady", &get_existing_steady, .{});
     try stable_bench.addParam("scan256 isolated", &scan_prefix, .{});
     try stable_bench.addParam("scan256 steady", &scan_prefix_steady, .{});
+    try stable_bench.addParam("scan64 in-view steady", &scan_prefix_in_view_steady, .{});
     try stable_bench.addParam("batch64 isolated", &apply_batch, .{});
     try stable_bench.addParam("batch64 steady overwrite", &apply_batch_steady_overwrite, .{});
     try stable_bench.addParam("checked64 isolated", &apply_checked_batch, .{});
@@ -382,6 +395,7 @@ fn init_steady_state_benches() !void {
 
     steady_scan_db = try open_bench_db(std.heap.page_allocator);
     load_scan_fixture(steady_scan_db.?);
+    steady_scan_view = try steady_scan_db.?.read_view();
 
     steady_batch_overwrite_db = try open_bench_db(std.heap.page_allocator);
     prime_batch_fixture(steady_batch_overwrite_db.?, "batch");
@@ -397,6 +411,10 @@ fn init_steady_state_benches() !void {
 }
 
 fn deinit_steady_state_benches() void {
+    if (steady_scan_view) |*view| {
+        view.deinit();
+        steady_scan_view = null;
+    }
     if (steady_checked_batch_insert_db) |db| {
         db.close() catch unreachable;
         steady_checked_batch_insert_db = null;

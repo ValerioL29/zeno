@@ -1706,6 +1706,58 @@ test "scan_prefix_from_in_view paginates in key order" {
     try testing.expectEqualStrings("alpha:2", second_page.entries.items[0].key);
 }
 
+test "scan_prefix_from_in_view merges cross-shard heads in global key order" {
+    const testing = std.testing;
+
+    var candidate_storage: [256][16]u8 = undefined;
+    var chosen: [3][]const u8 = undefined;
+    var chosen_count: usize = 0;
+    var seen_shards = [_]bool{false} ** runtime_shard.NUM_SHARDS;
+
+    for (0..candidate_storage.len) |index| {
+        const candidate = try std.fmt.bufPrint(&candidate_storage[index], "merge:{d:0>3}", .{index});
+        const shard_idx = runtime_shard.get_shard_index(candidate);
+        if (seen_shards[shard_idx]) continue;
+        seen_shards[shard_idx] = true;
+        chosen[chosen_count] = candidate;
+        chosen_count += 1;
+        if (chosen_count == chosen.len) break;
+    }
+
+    try testing.expectEqual(@as(usize, chosen.len), chosen_count);
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const one = types.Value{ .integer = 1 };
+    const two = types.Value{ .integer = 2 };
+    const three = types.Value{ .integer = 3 };
+    try db.put(chosen[0], &one);
+    try db.put(chosen[1], &two);
+    try db.put(chosen[2], &three);
+
+    var view = try db.read_view();
+    defer view.deinit();
+
+    var first_page = try scan_prefix_from_in_view(&view, testing.allocator, "merge:", null, 2);
+    defer first_page.deinit();
+
+    try testing.expectEqual(@as(usize, 2), first_page.entries.items.len);
+    try testing.expectEqualStrings(chosen[0], first_page.entries.items[0].key);
+    try testing.expectEqualStrings(chosen[1], first_page.entries.items[1].key);
+    try testing.expect(first_page.borrow_next_cursor() != null);
+
+    var cursor = first_page.take_next_cursor().?;
+    defer cursor.deinit();
+    const cursor_view = cursor.as_cursor().?;
+    var second_page = try scan_prefix_from_in_view(&view, testing.allocator, "merge:", &cursor_view, 2);
+    defer second_page.deinit();
+
+    try testing.expectEqual(@as(usize, 1), second_page.entries.items.len);
+    try testing.expectEqualStrings(chosen[2], second_page.entries.items[0].key);
+    try testing.expect(second_page.borrow_next_cursor() == null);
+}
+
 test "scan_prefix_from_in_view cursor records the real shard index of the last emitted key" {
     const testing = std.testing;
 
