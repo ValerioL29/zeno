@@ -11,6 +11,7 @@ const official = zeno_core.official;
 const types = zeno_core.types;
 
 const scan_item_count: usize = 256;
+const scan_large_item_count: usize = 4096;
 const scan_page_item_count: usize = 64;
 const batch_item_count: usize = 64;
 const batch_key_storage_bytes: usize = 32;
@@ -20,6 +21,8 @@ var steady_put_db: ?*engine.Database = null;
 var steady_get_db: ?*engine.Database = null;
 var steady_scan_db: ?*engine.Database = null;
 var steady_scan_view: ?types.ReadView = null;
+var steady_scan_large_db: ?*engine.Database = null;
+var steady_scan_large_view: ?types.ReadView = null;
 var steady_batch_overwrite_db: ?*engine.Database = null;
 var steady_batch_insert_db: ?*engine.Database = null;
 var steady_checked_batch_overwrite_db: ?*engine.Database = null;
@@ -87,7 +90,7 @@ const ScanPrefixBenchmark = struct {
         const db = open_bench_db(allocator) catch unreachable;
         defer db.close() catch unreachable;
 
-        load_scan_fixture(db);
+        load_scan_fixture(scan_item_count, db);
 
         var result = db.scan_prefix(allocator, "scan:") catch unreachable;
         defer result.deinit();
@@ -107,6 +110,24 @@ const ScanPrefixSteadyBenchmark = struct {
 const ScanPrefixInViewSteadyBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
         const view = if (steady_scan_view) |*stored| stored else unreachable;
+        var page = official.scan_prefix_from_in_view(view, allocator, "scan:", null, scan_page_item_count) catch unreachable;
+        defer page.deinit();
+        std.mem.doNotOptimizeAway(page.entries.items.len);
+    }
+};
+
+const ScanPrefixLargeSteadyBenchmark = struct {
+    pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
+        const db = steady_scan_large_db orelse unreachable;
+        var result = db.scan_prefix(allocator, "scan:") catch unreachable;
+        defer result.deinit();
+        std.mem.doNotOptimizeAway(result.entries.items.len);
+    }
+};
+
+const ScanPrefixLargeInViewSteadyBenchmark = struct {
+    pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
+        const view = if (steady_scan_large_view) |*stored| stored else unreachable;
         var page = official.scan_prefix_from_in_view(view, allocator, "scan:", null, scan_page_item_count) catch unreachable;
         defer page.deinit();
         std.mem.doNotOptimizeAway(page.entries.items.len);
@@ -328,6 +349,8 @@ fn run_bench_suite(
     const scan_prefix = ScanPrefixBenchmark{};
     const scan_prefix_steady = ScanPrefixSteadyBenchmark{};
     const scan_prefix_in_view_steady = ScanPrefixInViewSteadyBenchmark{};
+    const scan_prefix_large_steady = ScanPrefixLargeSteadyBenchmark{};
+    const scan_prefix_large_in_view_steady = ScanPrefixLargeInViewSteadyBenchmark{};
     const apply_batch = ApplyBatchBenchmark{};
     const apply_batch_steady_overwrite = ApplyBatchSteadyOverwriteBenchmark{};
     const apply_batch_steady_insert = ApplyBatchSteadyInsertBenchmark{};
@@ -342,6 +365,8 @@ fn run_bench_suite(
     try stable_bench.addParam("scan256 isolated", &scan_prefix, .{});
     try stable_bench.addParam("scan256 steady", &scan_prefix_steady, .{});
     try stable_bench.addParam("scan64 in-view steady", &scan_prefix_in_view_steady, .{});
+    try stable_bench.addParam("scan4096 steady", &scan_prefix_large_steady, .{});
+    try stable_bench.addParam("scan64 in-view 4096 steady", &scan_prefix_large_in_view_steady, .{});
     try stable_bench.addParam("batch64 isolated", &apply_batch, .{});
     try stable_bench.addParam("batch64 steady overwrite", &apply_batch_steady_overwrite, .{});
     try stable_bench.addParam("checked64 isolated", &apply_checked_batch, .{});
@@ -371,9 +396,9 @@ fn print_metrics_config(writer: anytype, metrics_config: types.MetricsConfig) !v
     }
 }
 
-fn load_scan_fixture(db: *engine.Database) void {
-    var key_storage: [scan_item_count][16]u8 = undefined;
-    for (0..scan_item_count) |index| {
+fn load_scan_fixture(comptime count: usize, db: *engine.Database) void {
+    var key_storage: [count][16]u8 = undefined;
+    for (0..count) |index| {
         const key = std.fmt.bufPrint(&key_storage[index], "scan:{d:0>4}", .{index}) catch unreachable;
         const value = types.Value{ .integer = @intCast(index) };
         db.put(key, &value) catch unreachable;
@@ -394,8 +419,12 @@ fn init_steady_state_benches() !void {
     }
 
     steady_scan_db = try open_bench_db(std.heap.page_allocator);
-    load_scan_fixture(steady_scan_db.?);
+    load_scan_fixture(scan_item_count, steady_scan_db.?);
     steady_scan_view = try steady_scan_db.?.read_view();
+
+    steady_scan_large_db = try open_bench_db(std.heap.page_allocator);
+    load_scan_fixture(scan_large_item_count, steady_scan_large_db.?);
+    steady_scan_large_view = try steady_scan_large_db.?.read_view();
 
     steady_batch_overwrite_db = try open_bench_db(std.heap.page_allocator);
     prime_batch_fixture(steady_batch_overwrite_db.?, "batch");
@@ -414,6 +443,10 @@ fn deinit_steady_state_benches() void {
     if (steady_scan_view) |*view| {
         view.deinit();
         steady_scan_view = null;
+    }
+    if (steady_scan_large_view) |*view| {
+        view.deinit();
+        steady_scan_large_view = null;
     }
     if (steady_checked_batch_insert_db) |db| {
         db.close() catch unreachable;
@@ -434,6 +467,10 @@ fn deinit_steady_state_benches() void {
     if (steady_scan_db) |db| {
         db.close() catch unreachable;
         steady_scan_db = null;
+    }
+    if (steady_scan_large_db) |db| {
+        db.close() catch unreachable;
+        steady_scan_large_db = null;
     }
     if (steady_get_db) |db| {
         db.close() catch unreachable;
