@@ -14,6 +14,7 @@ const FailingAllocator = std.testing.FailingAllocator;
 const scan_item_count: usize = 256;
 const scan_large_item_count: usize = 4096;
 const scan_page_item_count: usize = 64;
+const scan_candidate_shard_buffer_size: usize = 8;
 const batch_item_count: usize = 64;
 const batch_key_storage_bytes: usize = 32;
 
@@ -63,6 +64,7 @@ const ScanCandidateProfile = struct {
     art_fetches: usize,
     visibility_skips: usize,
     empty_fetches: usize,
+    buffered_entries_loaded: usize,
     allocations: usize,
     deallocations: usize,
     allocated_bytes: usize,
@@ -387,7 +389,10 @@ fn run_scan_allocation_profile(writer: anytype, metrics_config: types.MetricsCon
 fn run_scan_candidate_profile(writer: anytype, metrics_config: types.MetricsConfig) !void {
     bench_metrics_config = metrics_config;
     try print_metrics_config(writer, metrics_config);
-    try writer.print("scan candidate profile (prefix=\"scan:\", page_limit={d})\n", .{scan_page_item_count});
+    try writer.print(
+        "scan candidate profile (prefix=\"scan:\", page_limit={d}, shard_buffer_size={d})\n",
+        .{ scan_page_item_count, scan_candidate_shard_buffer_size },
+    );
 
     const scan256_full = try profile_public_full_scan(scan_item_count);
     try print_scan_candidate_profile(writer, "scan256 steady", scan256_full);
@@ -395,11 +400,17 @@ fn run_scan_candidate_profile(writer: anytype, metrics_config: types.MetricsConf
     const scan256_candidate = try profile_merged_full_scan_candidate(scan_item_count);
     try print_scan_candidate_profile(writer, "scan256 merged page-loop candidate", scan256_candidate);
 
+    const scan256_buffered_candidate = try profile_buffered_merged_full_scan_candidate(scan_item_count);
+    try print_scan_candidate_profile(writer, "scan256 merged shard-buffer candidate", scan256_buffered_candidate);
+
     const scan4096_full = try profile_public_full_scan(scan_large_item_count);
     try print_scan_candidate_profile(writer, "scan4096 steady", scan4096_full);
 
     const scan4096_candidate = try profile_merged_full_scan_candidate(scan_large_item_count);
     try print_scan_candidate_profile(writer, "scan4096 merged page-loop candidate", scan4096_candidate);
+
+    const scan4096_buffered_candidate = try profile_buffered_merged_full_scan_candidate(scan_large_item_count);
+    try print_scan_candidate_profile(writer, "scan4096 merged shard-buffer candidate", scan4096_buffered_candidate);
 }
 
 fn print_scan_allocation_profile(
@@ -427,7 +438,7 @@ fn print_scan_candidate_profile(
     profile: ScanCandidateProfile,
 ) !void {
     try writer.print(
-        "{s}: entries={d} pages={d} cursor_handoffs={d} initial_fetch_calls={d} refill_fetch_calls={d} art_fetches={d} visibility_skips={d} empty_fetches={d} allocations={d} deallocations={d} allocated_bytes={d} freed_bytes={d} elapsed_ns={d}\n",
+        "{s}: entries={d} pages={d} cursor_handoffs={d} initial_fetch_calls={d} refill_fetch_calls={d} art_fetches={d} visibility_skips={d} empty_fetches={d} buffered_entries_loaded={d} allocations={d} deallocations={d} allocated_bytes={d} freed_bytes={d} elapsed_ns={d}\n",
         .{
             label,
             profile.emitted_entries,
@@ -438,6 +449,7 @@ fn print_scan_candidate_profile(
             profile.art_fetches,
             profile.visibility_skips,
             profile.empty_fetches,
+            profile.buffered_entries_loaded,
             profile.allocations,
             profile.deallocations,
             profile.allocated_bytes,
@@ -456,6 +468,7 @@ fn accumulate_merge_profile_stats(
     totals.art_fetches += page_stats.art_fetches;
     totals.visibility_skips += page_stats.visibility_skips;
     totals.empty_fetches += page_stats.empty_fetches;
+    totals.buffered_entries_loaded += page_stats.buffered_entries_loaded;
 }
 
 fn profile_scan_allocations(
@@ -539,6 +552,7 @@ fn profile_public_full_scan(comptime fixture_items: usize) !ScanCandidateProfile
         .art_fetches = 0,
         .visibility_skips = 0,
         .empty_fetches = 0,
+        .buffered_entries_loaded = 0,
         .allocations = counting_state.allocations,
         .deallocations = counting_state.deallocations,
         .allocated_bytes = counting_state.allocated_bytes,
@@ -643,6 +657,57 @@ fn profile_merged_full_scan_candidate(comptime fixture_items: usize) !ScanCandid
         .art_fetches = merge_stats.art_fetches,
         .visibility_skips = merge_stats.visibility_skips,
         .empty_fetches = merge_stats.empty_fetches,
+        .buffered_entries_loaded = merge_stats.buffered_entries_loaded,
+        .allocations = counting_state.allocations,
+        .deallocations = counting_state.deallocations,
+        .allocated_bytes = counting_state.allocated_bytes,
+        .freed_bytes = counting_state.freed_bytes,
+        .elapsed_ns = elapsed_ns,
+    };
+}
+
+fn profile_buffered_merged_full_scan_candidate(comptime fixture_items: usize) !ScanCandidateProfile {
+    var db_gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(db_gpa.deinit() == .ok);
+
+    const db = try open_bench_db(db_gpa.allocator());
+    defer db.close() catch unreachable;
+    load_scan_fixture(fixture_items, db);
+
+    var result_gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(result_gpa.deinit() == .ok);
+
+    var counting_state = FailingAllocator.init(result_gpa.allocator(), .{});
+    const counting_allocator = counting_state.allocator();
+
+    var view = try db.read_view();
+    defer view.deinit();
+
+    var timer = try std.time.Timer.start();
+    var profiled_result = try official.scan_prefix_materialized_from_in_view_profiled(
+        &view,
+        counting_allocator,
+        "scan:",
+        scan_candidate_shard_buffer_size,
+    );
+    const elapsed_ns = timer.read();
+
+    const emitted_entries = profiled_result.result.entries.items.len;
+    std.debug.assert(emitted_entries == fixture_items);
+    profiled_result.result.deinit();
+
+    std.debug.assert(counting_state.allocated_bytes == counting_state.freed_bytes);
+
+    return .{
+        .emitted_entries = emitted_entries,
+        .page_calls = 1,
+        .cursor_handoffs = 0,
+        .initial_fetch_calls = profiled_result.stats.initial_fetch_calls,
+        .refill_fetch_calls = profiled_result.stats.refill_fetch_calls,
+        .art_fetches = profiled_result.stats.art_fetches,
+        .visibility_skips = profiled_result.stats.visibility_skips,
+        .empty_fetches = profiled_result.stats.empty_fetches,
+        .buffered_entries_loaded = profiled_result.stats.buffered_entries_loaded,
         .allocations = counting_state.allocations,
         .deallocations = counting_state.deallocations,
         .allocated_bytes = counting_state.allocated_bytes,

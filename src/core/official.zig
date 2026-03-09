@@ -25,6 +25,7 @@ pub const CheckedBatchGuard = types.CheckedBatchGuard;
 pub const Error = engine_db.EngineError;
 pub const MergePageProfileStats = engine_db.MergePageProfileStats;
 pub const ProfiledScanPageResult = engine_db.ProfiledScanPageResult;
+pub const ProfiledScanResult = engine_db.ProfiledScanResult;
 
 /// Scans the next prefix page inside a consistent read view.
 ///
@@ -62,6 +63,24 @@ pub fn scan_prefix_from_in_view_profiled(
     limit: usize,
 ) Error!ProfiledScanPageResult {
     return engine_db.scan_prefix_from_in_view_profiled(view, allocator, prefix, cursor, limit);
+}
+
+/// Materializes one full prefix scan inside a consistent read view while reporting chunked merged-executor counters.
+///
+/// Time Complexity: O(s log s + r * (k + log s + v)), where `s` is shard count, `r` is emitted result size, `k` is ART seek work for one chunk refill, and `v` is total cloned value size.
+///
+/// Allocator: Allocates owned entry keys and values plus result storage and bounded per-shard chunk scratch through `allocator`.
+///
+/// Ownership: Returns a caller-owned `ScanResult` plus profiling counters by value. The caller must later call `deinit` on the returned `ScanResult`.
+///
+/// Thread Safety: Relies on the caller-owned `ReadView` visibility hold and takes shard shared locks while seeding or refilling shard-local ART chunks.
+pub fn scan_prefix_materialized_from_in_view_profiled(
+    view: *const ReadView,
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    shard_chunk_size: usize,
+) Error!ProfiledScanResult {
+    return engine_db.scan_prefix_materialized_from_in_view_profiled(view, allocator, prefix, shard_chunk_size);
 }
 
 /// Scans the next range page inside a consistent read view.
