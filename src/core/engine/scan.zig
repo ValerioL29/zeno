@@ -36,6 +36,7 @@ pub const MergePageProfileStats = struct {
     refill_fetch_elapsed_ns: u64 = 0,
     heap_push_elapsed_ns: u64 = 0,
     heap_pop_elapsed_ns: u64 = 0,
+    winner_select_elapsed_ns: u64 = 0,
     clone_elapsed_ns: u64 = 0,
     result_append_elapsed_ns: u64 = 0,
 };
@@ -241,6 +242,144 @@ const PrefixShardChunkMergeState = struct {
         }
 
         return page;
+    }
+};
+
+const PrefixShardChunkWinnerSelectState = struct {
+    prefix_scratch: std.ArrayList(art.ScanEntry),
+    chunks: [runtime_shard.NUM_SHARDS]BorrowedShardChunk,
+    active_heads: [runtime_shard.NUM_SHARDS]?art.ScanEntry,
+    active_count: usize,
+    prefix: []const u8,
+    shard_chunk_size: usize,
+    now: i64,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        state: *const runtime_state.DatabaseState,
+        prefix: []const u8,
+        shard_chunk_size: usize,
+        now: i64,
+        stats: *MergePageProfileStats,
+    ) error_mod.EngineError!@This() {
+        var self = @This(){
+            .prefix_scratch = std.ArrayList(art.ScanEntry).empty,
+            .chunks = [_]BorrowedShardChunk{.{}} ** runtime_shard.NUM_SHARDS,
+            .active_heads = [_]?art.ScanEntry{null} ** runtime_shard.NUM_SHARDS,
+            .active_count = 0,
+            .prefix = prefix,
+            .shard_chunk_size = shard_chunk_size,
+            .now = now,
+        };
+        errdefer self.deinit(allocator);
+
+        if (shard_chunk_size == 0) return self;
+
+        for (&state.shards, 0..) |*shard, shard_idx| {
+            try fetch_visible_prefix_chunk_profiled(
+                allocator,
+                &self.prefix_scratch,
+                &self.chunks[shard_idx],
+                shard,
+                prefix,
+                null,
+                shard_chunk_size,
+                now,
+                stats,
+                .initial,
+            );
+            self.set_active_head(shard_idx, self.chunks[shard_idx].peek());
+        }
+
+        return self;
+    }
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        self.prefix_scratch.deinit(allocator);
+        for (&self.chunks) |*chunk| chunk.deinit(allocator);
+        self.* = undefined;
+    }
+
+    fn set_active_head(self: *@This(), shard_idx: usize, maybe_entry: ?art.ScanEntry) void {
+        const was_active = self.active_heads[shard_idx] != null;
+        const is_active = maybe_entry != null;
+        self.active_heads[shard_idx] = maybe_entry;
+
+        if (!was_active and is_active) {
+            self.active_count += 1;
+        } else if (was_active and !is_active) {
+            self.active_count -= 1;
+        }
+    }
+
+    fn refill_chunk_for_shard(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+        state: *const runtime_state.DatabaseState,
+        shard_idx: usize,
+        start_after_key: []const u8,
+        stats: *MergePageProfileStats,
+    ) error_mod.EngineError!void {
+        try fetch_visible_prefix_chunk_profiled(
+            allocator,
+            &self.prefix_scratch,
+            &self.chunks[shard_idx],
+            &state.shards[shard_idx],
+            self.prefix,
+            start_after_key,
+            self.shard_chunk_size,
+            self.now,
+            stats,
+            .refill,
+        );
+        self.set_active_head(shard_idx, self.chunks[shard_idx].peek());
+    }
+
+    fn take_next_head(self: *@This(), stats: *MergePageProfileStats) ?BorrowedShardHead {
+        if (self.active_count == 0) return null;
+
+        var timer = std.time.Timer.start() catch unreachable;
+        var winner_idx: ?usize = null;
+        var winner_entry: art.ScanEntry = undefined;
+
+        for (self.active_heads, 0..) |maybe_entry, shard_idx| {
+            const entry = maybe_entry orelse continue;
+            if (winner_idx == null or std.mem.lessThan(u8, entry.key, winner_entry.key)) {
+                winner_idx = shard_idx;
+                winner_entry = entry;
+            }
+        }
+
+        stats.winner_select_elapsed_ns += timer.read();
+
+        const shard_idx = winner_idx orelse return null;
+        self.active_heads[shard_idx] = null;
+        self.active_count -= 1;
+        return .{
+            .shard_idx = @intCast(shard_idx),
+            .entry = winner_entry,
+        };
+    }
+
+    fn next_owned_entry(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+        state: *const runtime_state.DatabaseState,
+        stats: *MergePageProfileStats,
+    ) error_mod.EngineError!?types.ScanEntry {
+        const head = self.take_next_head(stats) orelse return null;
+        const owned_entry = try clone_entry_profiled(allocator, head.entry.key, head.entry.value, stats);
+
+        var chunk = &self.chunks[head.shard_idx];
+        chunk.advance();
+
+        if (chunk.peek()) |next_entry| {
+            self.set_active_head(head.shard_idx, next_entry);
+        } else {
+            try self.refill_chunk_for_shard(allocator, state, head.shard_idx, head.entry.key, stats);
+        }
+
+        return owned_entry;
     }
 };
 
@@ -883,6 +1022,49 @@ fn materialize_prefix_from_shard_chunks_profiled(
     };
 }
 
+fn materialize_prefix_from_shard_chunks_winner_selected_profiled(
+    state: *const runtime_state.DatabaseState,
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    shard_chunk_size: usize,
+    now: i64,
+) error_mod.EngineError!ProfiledScanResult {
+    var stats = MergePageProfileStats{};
+    var result = types.ScanResult{
+        .entries = std.ArrayList(types.ScanEntry).empty,
+        .allocator = allocator,
+    };
+    errdefer result.deinit();
+
+    if (shard_chunk_size == 0) {
+        return .{
+            .result = result,
+            .stats = stats,
+        };
+    }
+
+    var merge_state = try PrefixShardChunkWinnerSelectState.init(
+        allocator,
+        state,
+        prefix,
+        shard_chunk_size,
+        now,
+        &stats,
+    );
+    defer merge_state.deinit(allocator);
+
+    while (try merge_state.next_owned_entry(allocator, state, &stats)) |entry| {
+        var append_timer = std.time.Timer.start() catch unreachable;
+        try result.entries.append(allocator, entry);
+        stats.result_append_elapsed_ns += append_timer.read();
+    }
+
+    return .{
+        .result = result,
+        .stats = stats,
+    };
+}
+
 fn materialize_prefix_from_persistent_pages_profiled(
     state: *const runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
@@ -1045,6 +1227,30 @@ pub fn scan_prefix_materialized_profiled(
     state.record_operation(.scan, 1);
 
     return materialize_prefix_from_shard_chunks_profiled(state, allocator, prefix, shard_chunk_size, now);
+}
+
+/// Materializes one full prefix scan over the current visible state while reporting chunked merged-executor counters for a fixed-fanout winner-selection candidate.
+///
+/// Time Complexity: O(s + r * (k + s + v)), where `s` is shard count, `r` is emitted result size, `k` is ART seek work for one chunk refill, and `v` is total cloned value size in the returned result.
+///
+/// Allocator: Allocates owned scan-entry keys, values, result storage, and bounded per-shard chunk scratch through `allocator`.
+///
+/// Ownership: Returns a caller-owned `ScanResult` plus profiling counters by value. The caller must later call `deinit` on the returned `ScanResult`.
+///
+/// Thread Safety: Acquires the shared side of the global visibility gate, then takes one shard-shared lock at a time while seeding or refilling shard-local ART chunks.
+pub fn scan_prefix_materialized_winner_selected_profiled(
+    state: *const runtime_state.DatabaseState,
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    shard_chunk_size: usize,
+) error_mod.EngineError!ProfiledScanResult {
+    const visibility_gate = @constCast(&state.visibility_gate);
+    visibility_gate.lock_shared();
+    defer visibility_gate.unlock_shared();
+    const now = runtime_shard.unix_now();
+    state.record_operation(.scan, 1);
+
+    return materialize_prefix_from_shard_chunks_winner_selected_profiled(state, allocator, prefix, shard_chunk_size, now);
 }
 
 /// Scans one prefix page inside a consistent read view.

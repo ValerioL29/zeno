@@ -70,6 +70,7 @@ const ScanCandidateProfile = struct {
     refill_fetch_elapsed_ns: u64,
     heap_push_elapsed_ns: u64,
     heap_pop_elapsed_ns: u64,
+    winner_select_elapsed_ns: u64,
     clone_elapsed_ns: u64,
     result_append_elapsed_ns: u64,
     allocations: usize,
@@ -413,6 +414,9 @@ fn run_scan_candidate_profile(writer: anytype, metrics_config: types.MetricsConf
     const scan256_public_buffered_candidate = try profile_public_buffered_merged_full_scan_candidate(scan_item_count, scan_candidate_shard_buffer_size);
     try print_scan_candidate_profile(writer, "scan256 merged public-shard-buffer-8 candidate", scan256_public_buffered_candidate);
 
+    const scan256_public_winner_selected_candidate = try profile_public_winner_selected_merged_full_scan_candidate(scan_item_count, scan_candidate_shard_buffer_size);
+    try print_scan_candidate_profile(writer, "scan256 merged public-winner-select-shard-buffer-8 candidate", scan256_public_winner_selected_candidate);
+
     const scan256_persistent_paged_candidate = try profile_persistent_paged_merged_full_scan_candidate(scan_item_count, scan_candidate_shard_buffer_size);
     try print_scan_candidate_profile(writer, "scan256 merged persistent-page-8 candidate", scan256_persistent_paged_candidate);
 
@@ -430,6 +434,9 @@ fn run_scan_candidate_profile(writer: anytype, metrics_config: types.MetricsConf
 
     const scan4096_public_buffered_candidate = try profile_public_buffered_merged_full_scan_candidate(scan_large_item_count, scan_candidate_shard_buffer_size);
     try print_scan_candidate_profile(writer, "scan4096 merged public-shard-buffer-8 candidate", scan4096_public_buffered_candidate);
+
+    const scan4096_public_winner_selected_candidate = try profile_public_winner_selected_merged_full_scan_candidate(scan_large_item_count, scan_candidate_shard_buffer_size);
+    try print_scan_candidate_profile(writer, "scan4096 merged public-winner-select-shard-buffer-8 candidate", scan4096_public_winner_selected_candidate);
 
     const scan4096_persistent_paged_candidate = try profile_persistent_paged_merged_full_scan_candidate(scan_large_item_count, scan_candidate_shard_buffer_size);
     try print_scan_candidate_profile(writer, "scan4096 merged persistent-page-8 candidate", scan4096_persistent_paged_candidate);
@@ -463,7 +470,7 @@ fn print_scan_candidate_profile(
     profile: ScanCandidateProfile,
 ) !void {
     try writer.print(
-        "{s}: entries={d} pages={d} cursor_handoffs={d} initial_fetch_calls={d} refill_fetch_calls={d} art_fetches={d} visibility_skips={d} empty_fetches={d} buffered_entries_loaded={d} initial_fetch_elapsed_ns={d} refill_fetch_elapsed_ns={d} heap_push_elapsed_ns={d} heap_pop_elapsed_ns={d} clone_elapsed_ns={d} result_append_elapsed_ns={d} allocations={d} deallocations={d} allocated_bytes={d} freed_bytes={d} elapsed_ns={d}\n",
+        "{s}: entries={d} pages={d} cursor_handoffs={d} initial_fetch_calls={d} refill_fetch_calls={d} art_fetches={d} visibility_skips={d} empty_fetches={d} buffered_entries_loaded={d} initial_fetch_elapsed_ns={d} refill_fetch_elapsed_ns={d} heap_push_elapsed_ns={d} heap_pop_elapsed_ns={d} winner_select_elapsed_ns={d} clone_elapsed_ns={d} result_append_elapsed_ns={d} allocations={d} deallocations={d} allocated_bytes={d} freed_bytes={d} elapsed_ns={d}\n",
         .{
             label,
             profile.emitted_entries,
@@ -479,6 +486,7 @@ fn print_scan_candidate_profile(
             profile.refill_fetch_elapsed_ns,
             profile.heap_push_elapsed_ns,
             profile.heap_pop_elapsed_ns,
+            profile.winner_select_elapsed_ns,
             profile.clone_elapsed_ns,
             profile.result_append_elapsed_ns,
             profile.allocations,
@@ -504,6 +512,7 @@ fn accumulate_merge_profile_stats(
     totals.refill_fetch_elapsed_ns += page_stats.refill_fetch_elapsed_ns;
     totals.heap_push_elapsed_ns += page_stats.heap_push_elapsed_ns;
     totals.heap_pop_elapsed_ns += page_stats.heap_pop_elapsed_ns;
+    totals.winner_select_elapsed_ns += page_stats.winner_select_elapsed_ns;
     totals.clone_elapsed_ns += page_stats.clone_elapsed_ns;
     totals.result_append_elapsed_ns += page_stats.result_append_elapsed_ns;
 }
@@ -594,6 +603,7 @@ fn profile_public_full_scan(comptime fixture_items: usize) !ScanCandidateProfile
         .refill_fetch_elapsed_ns = 0,
         .heap_push_elapsed_ns = 0,
         .heap_pop_elapsed_ns = 0,
+        .winner_select_elapsed_ns = 0,
         .clone_elapsed_ns = 0,
         .result_append_elapsed_ns = 0,
         .allocations = counting_state.allocations,
@@ -705,6 +715,7 @@ fn profile_merged_full_scan_candidate(comptime fixture_items: usize) !ScanCandid
         .refill_fetch_elapsed_ns = merge_stats.refill_fetch_elapsed_ns,
         .heap_push_elapsed_ns = merge_stats.heap_push_elapsed_ns,
         .heap_pop_elapsed_ns = merge_stats.heap_pop_elapsed_ns,
+        .winner_select_elapsed_ns = merge_stats.winner_select_elapsed_ns,
         .clone_elapsed_ns = merge_stats.clone_elapsed_ns,
         .result_append_elapsed_ns = merge_stats.result_append_elapsed_ns,
         .allocations = counting_state.allocations,
@@ -764,6 +775,7 @@ fn profile_buffered_merged_full_scan_candidate(
         .refill_fetch_elapsed_ns = profiled_result.stats.refill_fetch_elapsed_ns,
         .heap_push_elapsed_ns = profiled_result.stats.heap_push_elapsed_ns,
         .heap_pop_elapsed_ns = profiled_result.stats.heap_pop_elapsed_ns,
+        .winner_select_elapsed_ns = profiled_result.stats.winner_select_elapsed_ns,
         .clone_elapsed_ns = profiled_result.stats.clone_elapsed_ns,
         .result_append_elapsed_ns = profiled_result.stats.result_append_elapsed_ns,
         .allocations = counting_state.allocations,
@@ -820,6 +832,64 @@ fn profile_public_buffered_merged_full_scan_candidate(
         .refill_fetch_elapsed_ns = profiled_result.stats.refill_fetch_elapsed_ns,
         .heap_push_elapsed_ns = profiled_result.stats.heap_push_elapsed_ns,
         .heap_pop_elapsed_ns = profiled_result.stats.heap_pop_elapsed_ns,
+        .winner_select_elapsed_ns = profiled_result.stats.winner_select_elapsed_ns,
+        .clone_elapsed_ns = profiled_result.stats.clone_elapsed_ns,
+        .result_append_elapsed_ns = profiled_result.stats.result_append_elapsed_ns,
+        .allocations = counting_state.allocations,
+        .deallocations = counting_state.deallocations,
+        .allocated_bytes = counting_state.allocated_bytes,
+        .freed_bytes = counting_state.freed_bytes,
+        .elapsed_ns = elapsed_ns,
+    };
+}
+
+fn profile_public_winner_selected_merged_full_scan_candidate(
+    comptime fixture_items: usize,
+    shard_buffer_size: usize,
+) !ScanCandidateProfile {
+    var db_gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(db_gpa.deinit() == .ok);
+
+    const db = try open_bench_db(db_gpa.allocator());
+    defer db.close() catch unreachable;
+    load_scan_fixture(fixture_items, db);
+
+    var result_gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(result_gpa.deinit() == .ok);
+
+    var counting_state = FailingAllocator.init(result_gpa.allocator(), .{});
+    const counting_allocator = counting_state.allocator();
+
+    var timer = try std.time.Timer.start();
+    var profiled_result = try official.scan_prefix_materialized_winner_selected_profiled(
+        db,
+        counting_allocator,
+        "scan:",
+        shard_buffer_size,
+    );
+    const elapsed_ns = timer.read();
+
+    const emitted_entries = profiled_result.result.entries.items.len;
+    std.debug.assert(emitted_entries == fixture_items);
+    profiled_result.result.deinit();
+
+    std.debug.assert(counting_state.allocated_bytes == counting_state.freed_bytes);
+
+    return .{
+        .emitted_entries = emitted_entries,
+        .page_calls = 1,
+        .cursor_handoffs = 0,
+        .initial_fetch_calls = profiled_result.stats.initial_fetch_calls,
+        .refill_fetch_calls = profiled_result.stats.refill_fetch_calls,
+        .art_fetches = profiled_result.stats.art_fetches,
+        .visibility_skips = profiled_result.stats.visibility_skips,
+        .empty_fetches = profiled_result.stats.empty_fetches,
+        .buffered_entries_loaded = profiled_result.stats.buffered_entries_loaded,
+        .initial_fetch_elapsed_ns = profiled_result.stats.initial_fetch_elapsed_ns,
+        .refill_fetch_elapsed_ns = profiled_result.stats.refill_fetch_elapsed_ns,
+        .heap_push_elapsed_ns = profiled_result.stats.heap_push_elapsed_ns,
+        .heap_pop_elapsed_ns = profiled_result.stats.heap_pop_elapsed_ns,
+        .winner_select_elapsed_ns = profiled_result.stats.winner_select_elapsed_ns,
         .clone_elapsed_ns = profiled_result.stats.clone_elapsed_ns,
         .result_append_elapsed_ns = profiled_result.stats.result_append_elapsed_ns,
         .allocations = counting_state.allocations,
@@ -880,6 +950,7 @@ fn profile_persistent_paged_merged_full_scan_candidate(
         .refill_fetch_elapsed_ns = profiled_result.stats.refill_fetch_elapsed_ns,
         .heap_push_elapsed_ns = profiled_result.stats.heap_push_elapsed_ns,
         .heap_pop_elapsed_ns = profiled_result.stats.heap_pop_elapsed_ns,
+        .winner_select_elapsed_ns = profiled_result.stats.winner_select_elapsed_ns,
         .clone_elapsed_ns = profiled_result.stats.clone_elapsed_ns,
         .result_append_elapsed_ns = profiled_result.stats.result_append_elapsed_ns,
         .allocations = counting_state.allocations,
