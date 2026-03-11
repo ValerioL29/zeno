@@ -1507,6 +1507,217 @@ pub const ScanEntry = struct {
     value: *const Value,
 };
 
+/// A stateful Iterator for Adaptive Radix Tree, allowing incremental O(1) `next()` calls
+/// after an initial O(k) seek setup. Eliminates per-item chunk allocations.
+pub const Iterator = struct {
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    cursor: ?[]const u8,
+    stack: std.ArrayList(Frame),
+
+    pub const Frame = struct {
+        node: *const Node,
+        depth: usize,
+        step: u16,
+    };
+
+    /// Initializes a new Prefix Scanner Iterator.
+    /// `cursor` must outlive the `Iterator` if provided.
+    pub fn init(allocator: std.mem.Allocator, tree: *const Tree, prefix: []const u8, cursor: ?[]const u8) !Iterator {
+        var it = Iterator{
+            .allocator = allocator,
+            .prefix = prefix,
+            .cursor = cursor,
+            .stack = .empty,
+        };
+        if (!tree.root.is_empty()) {
+            try it.stack.append(allocator, .{
+                .node = &tree.root,
+                .depth = 0,
+                .step = 0,
+            });
+        }
+        return it;
+    }
+
+    /// Frees internal stack allocations.
+    pub fn deinit(self: *Iterator) void {
+        self.stack.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    /// Advances the iterator and returns the next matching element.
+    /// Time Complexity: O(k) for the first call (seek), O(1) amortized for subsequent calls.
+    pub fn next(self: *Iterator) !?ScanEntry {
+        while (self.stack.items.len > 0) {
+            const frame_idx = self.stack.items.len - 1;
+            var frame = &self.stack.items[frame_idx];
+
+            switch (frame.node.*) {
+                .empty => {
+                    _ = self.stack.pop();
+                    continue;
+                },
+                .leaf => |leaf| {
+                    const is_match = std.mem.startsWith(u8, leaf.key, self.prefix);
+                    var valid = is_match;
+                    
+                    if (valid and self.cursor != null) {
+                        if (std.mem.order(u8, self.cursor.?, leaf.key) != .lt) {
+                            valid = false;
+                        } else {
+                            self.cursor = null;
+                        }
+                    }
+                    
+                    _ = self.stack.pop();
+                    if (valid) return ScanEntry{ .key = leaf.key, .value = leaf.value };
+                    continue;
+                },
+                .internal => |header| {
+                    if (frame.step == 0) {
+                        frame.step = 1;
+
+                        const p_len = header.prefix_len;
+                        const max_cmp = @min(p_len, MAX_PREFIX_LEN);
+                        var match = true;
+                        var d = frame.depth;
+
+                        for (0..max_cmp) |i| {
+                            if (d >= self.prefix.len) break;
+                            if (header.prefix[i] != self.prefix[d]) {
+                                match = false; break;
+                            }
+                            d += 1;
+                        }
+
+                        if (match and p_len > MAX_PREFIX_LEN) {
+                            const any = Tree.find_any_leaf(frame.node);
+                            for (MAX_PREFIX_LEN..p_len) |_| {
+                                if (d >= self.prefix.len) break;
+                                if (any.key[d] != self.prefix[d]) {
+                                    match = false; break;
+                                }
+                                d += 1;
+                            }
+                        }
+
+                        if (!match) {
+                            _ = self.stack.pop();
+                            continue;
+                        }
+
+                        if (self.cursor) |c| {
+                            const step_cmp = Tree.compare_compressed_prefix_with_cursor(frame.node, header, frame.depth, c);
+                            if (step_cmp.relation == .before_cursor) {
+                                _ = self.stack.pop();
+                                continue;
+                            }
+                        }
+
+                        if (header.leaf_value) |lv| {
+                            var lv_valid = std.mem.startsWith(u8, lv.key, self.prefix);
+                            if (lv_valid and self.cursor != null) {
+                                if (std.mem.order(u8, self.cursor.?, lv.key) != .lt) {
+                                    lv_valid = false;
+                                } else {
+                                    self.cursor = null;
+                                }
+                            }
+                            if (lv_valid) return ScanEntry{ .key = lv.key, .value = lv.value };
+                        }
+                        continue;
+                    }
+
+                    const p_len = header.prefix_len;
+                    var child_to_push: ?*const Node = null;
+
+                    switch (header.node_type) {
+                        .node4 => {
+                            const n4 = @as(*const Node4, @alignCast(@fieldParentPtr("header", header)));
+                            while (frame.step - 1 < n4.header.num_children) {
+                                const i = frame.step - 1;
+                                frame.step += 1;
+                                const cb = n4.keys[i];
+                                
+                                if (self.cursor) |c| {
+                                    const nd = frame.depth + p_len;
+                                    if (nd < c.len and cb < c[nd]) continue;
+                                }
+                                
+                                child_to_push = &n4.children[i];
+                                break;
+                            }
+                        },
+                        .node16 => {
+                            const n16 = @as(*const Node16, @alignCast(@fieldParentPtr("header", header)));
+                            while (frame.step - 1 < n16.header.num_children) {
+                                const i = frame.step - 1;
+                                frame.step += 1;
+                                const cb = n16.keys[i];
+                                
+                                if (self.cursor) |c| {
+                                    const nd = frame.depth + p_len;
+                                    if (nd < c.len and cb < c[nd]) continue;
+                                }
+                                
+                                child_to_push = &n16.children[i];
+                                break;
+                            }
+                        },
+                        .node48 => {
+                            const n48 = @as(*const Node48, @alignCast(@fieldParentPtr("header", header)));
+                            while (frame.step - 1 < 256) {
+                                const i = frame.step - 1;
+                                frame.step += 1;
+                                const idx = n48.child_index[i];
+                                if (idx == Node48.EMPTY_INDEX) continue;
+                                
+                                const cb: u8 = @intCast(i);
+                                if (self.cursor) |c| {
+                                    const nd = frame.depth + p_len;
+                                    if (nd < c.len and cb < c[nd]) continue;
+                                }
+                                
+                                child_to_push = &n48.children[idx];
+                                break;
+                            }
+                        },
+                        .node256 => {
+                            const n256 = @as(*const Node256, @alignCast(@fieldParentPtr("header", header)));
+                            while (frame.step - 1 < 256) {
+                                const i = frame.step - 1;
+                                frame.step += 1;
+                                if (n256.children[i].is_empty()) continue;
+                                
+                                const cb: u8 = @intCast(i);
+                                if (self.cursor) |c| {
+                                    const nd = frame.depth + p_len;
+                                    if (nd < c.len and cb < c[nd]) continue;
+                                }
+                                
+                                child_to_push = &n256.children[i];
+                                break;
+                            }
+                        },
+                    }
+
+                    if (child_to_push) |child| {
+                        try self.stack.append(self.allocator, .{
+                            .node = child,
+                            .depth = frame.depth + p_len + 1,
+                            .step = 0,
+                        });
+                    } else {
+                        _ = self.stack.pop();
+                    }
+                }
+            }
+        }
+        return null;
+    }
+};
+
 fn create_test_value(allocator: std.mem.Allocator, value_int: i64) !*Value {
     const value = try allocator.create(Value);
     value.* = .{ .integer = value_int };
