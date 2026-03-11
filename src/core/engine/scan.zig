@@ -1673,12 +1673,16 @@ const PrefixShardIteratorMergeState = struct {
         self: *@This(),
         allocator: std.mem.Allocator,
     ) error_mod.EngineError!?types.ScanEntry {
-        const head = self.heap.remove_min() orelse return null;
+        if (self.heap.len == 0) return null;
+        const head = self.heap.items[0];
         const owned_entry = try clone_entry(allocator, head.entry.key, head.entry.value);
 
         const shard_idx = head.shard_idx;
         if (try next_visible_from_iterator(&self.iterators[shard_idx], &self.state.shards[shard_idx], self.now)) |next_entry| {
-            self.heap.add(.{ .shard_idx = shard_idx, .entry = next_entry });
+            self.heap.items[0] = .{ .shard_idx = shard_idx, .entry = next_entry };
+            self.heap.sift_down(0);
+        } else {
+            _ = self.heap.remove_min();
         }
 
         return owned_entry;
