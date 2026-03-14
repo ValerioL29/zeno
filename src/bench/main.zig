@@ -4,11 +4,12 @@
 
 const std = @import("std");
 const zbench = @import("zbench");
-const zeno_core = @import("zeno_core");
+const zeno = @import("zeno");
 
-const engine = zeno_core.public;
-const official = zeno_core.official;
-const types = zeno_core.types;
+const engine = zeno.public;
+const official = zeno.official;
+const types = zeno.types;
+const internal = zeno.testing_internal;
 const FailingAllocator = std.testing.FailingAllocator;
 
 const scan_item_count: usize = 256;
@@ -30,6 +31,10 @@ var steady_checked_batch_overwrite_db: ?*engine.Database = null;
 var steady_checked_batch_insert_db: ?*engine.Database = null;
 var steady_batch_insert_seed = std.atomic.Value(usize).init(0);
 var steady_checked_batch_insert_seed = std.atomic.Value(usize).init(0);
+
+var steady_art_tree: ?internal.art.Tree = null;
+var steady_wal: ?internal.wal.Wal = null;
+var wal_bench_path: ?[]const u8 = null;
 
 const BenchCliConfig = struct {
     run_all_metrics_modes: bool = false,
@@ -261,6 +266,34 @@ const ApplyCheckedBatchSteadyInsertBenchmark = struct {
     }
 };
 
+const ArtLookupBenchmark = struct {
+    pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
+        _ = allocator;
+        const tree = if (steady_art_tree) |*t| t else unreachable;
+        const value = tree.lookup("scan:0000") orelse unreachable;
+        std.mem.doNotOptimizeAway(value.integer);
+    }
+};
+
+const ArtInsertBenchmark = struct {
+    pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
+        _ = allocator;
+        const tree = if (steady_art_tree) |*t| t else unreachable;
+        var value = types.Value{ .integer = 999 };
+        // Overwrite existing key to stay steady state
+        tree.insert("scan:0000", &value) catch unreachable;
+    }
+};
+
+const WalAppendBenchmark = struct {
+    pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
+        _ = allocator;
+        const wal = if (steady_wal) |*w| w else unreachable;
+        const value = types.Value{ .integer = 42 };
+        wal.append_put("bench:wal", &value) catch unreachable;
+    }
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -291,9 +324,139 @@ pub fn main() !void {
         }
     } else {
         try run_bench_suite(allocator, &stdout.interface, cli_config.metrics_config);
+        try print_throughput_summary(allocator, &stdout.interface, cli_config.metrics_config);
     }
 
     try stdout.interface.flush();
+}
+
+fn print_throughput_summary(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    metrics_config: types.MetricsConfig,
+) !void {
+    bench_metrics_config = metrics_config;
+    try init_steady_state_benches();
+    defer deinit_steady_state_benches();
+
+    try writer.print("\nThroughput Summary (Approximate)\n", .{});
+    try writer.print("--------------------------------------------------------------------------------\n", .{});
+    try writer.print("{s: <30} | {s: <15} | {s: <15}\n", .{ "Benchmark", "Mean Latency", "Throughput" });
+    try writer.print("--------------------------------------------------------------------------------\n", .{});
+
+    // We run a fixed number of iterations for throughput estimation
+    const iterations = 10_000;
+
+    try run_and_print_throughput(writer, "put steady", iterations, 1, struct {
+        fn run(_: std.mem.Allocator) void {
+            const db = steady_put_db orelse unreachable;
+            const value = types.Value{ .integer = 2 };
+            db.put("bench:put", &value) catch unreachable;
+        }
+    }.run, allocator);
+
+    try run_and_print_throughput(writer, "get steady", iterations, 1, struct {
+        fn run(alloc: std.mem.Allocator) void {
+            const db = steady_get_db orelse unreachable;
+            var stored = (db.get(alloc, "bench:get") catch unreachable).?;
+            defer stored.deinit(alloc);
+            std.mem.doNotOptimizeAway(stored.integer);
+        }
+    }.run, allocator);
+
+    try run_and_print_throughput(writer, "scan256 steady", 1000, 256, struct {
+        fn run(alloc: std.mem.Allocator) void {
+            const db = steady_scan_db orelse unreachable;
+            var result = db.scan_prefix(alloc, "scan:") catch unreachable;
+            defer result.deinit();
+            std.mem.doNotOptimizeAway(result.entries.items.len);
+        }
+    }.run, allocator);
+
+    try run_and_print_throughput(writer, "scan4096 steady", 100, 4096, struct {
+        fn run(alloc: std.mem.Allocator) void {
+            const db = steady_scan_large_db orelse unreachable;
+            var result = db.scan_prefix(alloc, "scan:") catch unreachable;
+            defer result.deinit();
+            std.mem.doNotOptimizeAway(result.entries.items.len);
+        }
+    }.run, allocator);
+
+    try run_and_print_throughput(writer, "batch64 steady overwrite", 1000, 64, struct {
+        fn run(_: std.mem.Allocator) void {
+            const db = steady_batch_overwrite_db orelse unreachable;
+            var values: [batch_item_count]types.Value = undefined;
+            var writes: [batch_item_count]types.PutWrite = undefined;
+            var key_storage: [batch_item_count][batch_key_storage_bytes]u8 = undefined;
+            fill_batch_writes(&values, &writes, &key_storage, "batch", 1_000, 0);
+            db.apply_batch(&writes) catch unreachable;
+        }
+    }.run, allocator);
+
+    try run_and_print_throughput(writer, "art lookup", iterations, 1, struct {
+        fn run(_: std.mem.Allocator) void {
+            const tree = if (steady_art_tree) |*t| t else unreachable;
+            const value = tree.lookup("scan:0000") orelse unreachable;
+            std.mem.doNotOptimizeAway(value.integer);
+        }
+    }.run, allocator);
+
+    try run_and_print_throughput(writer, "art insert", iterations, 1, struct {
+        fn run(_: std.mem.Allocator) void {
+            const tree = if (steady_art_tree) |*t| t else unreachable;
+            var value = types.Value{ .integer = 999 };
+            tree.insert("scan:0000", &value) catch unreachable;
+        }
+    }.run, allocator);
+
+    try run_and_print_throughput(writer, "wal append", iterations, 1, struct {
+        fn run(_: std.mem.Allocator) void {
+            const wal = if (steady_wal) |*w| w else unreachable;
+            const value = types.Value{ .integer = 42 };
+            wal.append_put("bench:wal", &value) catch unreachable;
+        }
+    }.run, allocator);
+
+    try writer.print("--------------------------------------------------------------------------------\n", .{});
+}
+
+fn run_and_print_throughput(
+    writer: anytype,
+    label: []const u8,
+    iterations: usize,
+    items_per_op: usize,
+    func: fn (std.mem.Allocator) void,
+    allocator: std.mem.Allocator,
+) !void {
+    var timer = try std.time.Timer.start();
+    for (0..iterations) |_| {
+        func(allocator);
+    }
+    const elapsed = timer.read();
+    const avg_ns = elapsed / iterations;
+    const ops_per_sec = (std.time.ns_per_s * iterations) / elapsed;
+    const items_per_sec = ops_per_sec * items_per_op;
+
+    var buf: [32]u8 = undefined;
+    const latency_text = if (avg_ns < 1000)
+        try std.fmt.bufPrint(&buf, "{d} ns", .{avg_ns})
+    else
+        try std.fmt.bufPrint(&buf, "{d:.2} us", .{@as(f64, @floatFromInt(avg_ns)) / 1000.0});
+
+    if (items_per_op > 1) {
+        try writer.print("{s: <30} | {s: <15} | {d:.2}M items/sec ({d:.2}M ops/sec)\n", .{
+            label,
+            latency_text,
+            @as(f64, @floatFromInt(items_per_sec)) / 1_000_000.0,
+            @as(f64, @floatFromInt(ops_per_sec)) / 1_000_000.0,
+        });
+    } else {
+        try writer.print("{s: <30} | {s: <15} | {d:.2}M ops/sec\n", .{
+            label,
+            latency_text,
+            @as(f64, @floatFromInt(ops_per_sec)) / 1_000_000.0,
+        });
+    }
 }
 
 fn parse_cli_config(allocator: std.mem.Allocator) !BenchCliConfig {
@@ -565,6 +728,10 @@ fn run_bench_suite(
     try growing_bench.addParam("batch64 growing insert", &apply_batch_steady_insert, .{});
     try growing_bench.addParam("checked64 growing insert", &apply_checked_batch_steady_insert, .{});
 
+    try stable_bench.addParam("art lookup", &ArtLookupBenchmark{}, .{});
+    try stable_bench.addParam("art insert", &ArtInsertBenchmark{}, .{});
+    try stable_bench.addParam("wal append", &WalAppendBenchmark{}, .{});
+
     try print_metrics_config(writer, metrics_config);
     try stable_bench.run(writer);
     try writer.print("\n", .{});
@@ -627,9 +794,46 @@ fn init_steady_state_benches() !void {
 
     steady_checked_batch_insert_db = try open_bench_db(std.heap.page_allocator);
     steady_checked_batch_insert_seed.store(0, .monotonic);
+
+    steady_art_tree = internal.art.Tree.init(std.heap.page_allocator);
+    load_scan_fixture_to_art(scan_item_count, &steady_art_tree.?);
+
+    wal_bench_path = try std.fmt.allocPrint(std.heap.page_allocator, "/tmp/zeno-bench-{d}.wal", .{std.time.timestamp()});
+    steady_wal = try internal.wal.Wal.open(wal_bench_path.?, .{ .fsync_mode = .batched_async }, .{
+        .ctx = undefined,
+        .put = struct {
+            fn func(_: *anyopaque, _: []const u8, _: *const types.Value) anyerror!void {}
+        }.func,
+        .delete = struct {
+            fn func(_: *anyopaque, _: []const u8) anyerror!void {}
+        }.func,
+        .expire = struct {
+            fn func(_: *anyopaque, _: []const u8, _: i64) anyerror!void {}
+        }.func,
+    }, std.heap.page_allocator);
+}
+
+fn load_scan_fixture_to_art(comptime count: usize, tree: *internal.art.Tree) void {
+    // We need to keep the values alive if they are heap-cloned, but here we use stack integer values
+    // In ART, we store pointers to Value.
+    // For benchmark stability, we'll pre-allocate a pool of values.
+    const values = std.heap.page_allocator.alloc(types.Value, count) catch unreachable;
+    for (0..count) |index| {
+        values[index] = .{ .integer = @intCast(index) };
+        const key = std.fmt.allocPrint(std.heap.page_allocator, "scan:{d:0>4}", .{index}) catch unreachable;
+        tree.insert(key, &values[index]) catch unreachable;
+    }
 }
 
 fn deinit_steady_state_benches() void {
+    if (steady_wal) |*wal| {
+        wal.close();
+        if (wal_bench_path) |path| {
+            std.fs.cwd().deleteFile(path) catch {};
+            std.heap.page_allocator.free(path);
+        }
+        steady_wal = null;
+    }
     if (steady_scan_view) |*view| {
         view.deinit();
         steady_scan_view = null;

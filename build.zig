@@ -4,10 +4,15 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const zeno_options = b.addOptions();
+    const expose_internals = b.option(bool, "expose_internals", "Expose internal modules for testing and benchmarking") orelse false;
+    zeno_options.addOption(bool, "expose_internals", expose_internals);
+
     const zeno_module = b.addModule("zeno", .{
         .root_source_file = b.path("src/zeno.zig"),
         .target = target,
     });
+    zeno_module.addOptions("config", zeno_options);
 
     const module_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -16,6 +21,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    module_tests.root_module.addOptions("config", zeno_options);
     const run_module_tests = b.addRunArtifact(module_tests);
 
     const test_step = b.step("test", "Run zeno-core tests");
@@ -25,6 +31,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    const bench_zeno_options = b.addOptions();
+    bench_zeno_options.addOption(bool, "expose_internals", true);
+    const bench_zeno_module = b.createModule(.{
+        .root_source_file = b.path("src/zeno.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_zeno_module.addOptions("config", bench_zeno_options);
+
     const bench_exe = b.addExecutable(.{
         .name = "zeno-core-bench",
         .root_module = b.createModule(.{
@@ -33,7 +49,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    bench_exe.root_module.addImport("zeno", zeno_module);
+    bench_exe.root_module.addImport("zeno", bench_zeno_module);
     bench_exe.root_module.addImport("zbench", zbench_dep.module("zbench"));
 
     const run_bench = b.addRunArtifact(bench_exe);
