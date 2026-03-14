@@ -1,11 +1,11 @@
-# Zeno - Zig  Engine for Node Operations
+# Zeno - Zig Engine for Node Operations
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Zig Version](https://img.shields.io/badge/Zig-0.15.2-orange.svg)](https://ziglang.org)
 
-Zeno is a high-performance, embedded key-value storage engine written in pure Zig. Designed for modern workloads, it prioritizes predictable low latency, zero-implicit allocation, and efficient sharded concurrency.
+Zeno is a high-performance, embedded key-value storage engine written in pure Zig. Designed for modern workloads, it prioritizes predictable low latency, zero-implicit allocation, and efficient sharded concurrency. Its name (Node) reflects the core index and storage nodes that power each operation, not to be confused with Node.js.
 
-Zeno began as a learning experiment into database storage internals and the Adaptive Radix Tree (ART). The results and the performance were promising, that it evolved into a standalone engine.
+Zeno began as a learning experiment into database storage internals and the Adaptive Radix Tree (ART). The results and performance were promising enough that it evolved into a standalone engine.
 
 ---
 
