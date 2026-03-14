@@ -17,6 +17,26 @@ const scan_large_item_count: usize = 4096;
 const scan_page_item_count: usize = 64;
 const batch_item_count: usize = 64;
 const batch_key_storage_bytes: usize = 32;
+const put_group_item_count: usize = 16;
+const wal_group_item_count: usize = 16;
+const wal_group_keys = [_][]const u8{
+    "bench:wal:00",
+    "bench:wal:01",
+    "bench:wal:02",
+    "bench:wal:03",
+    "bench:wal:04",
+    "bench:wal:05",
+    "bench:wal:06",
+    "bench:wal:07",
+    "bench:wal:08",
+    "bench:wal:09",
+    "bench:wal:10",
+    "bench:wal:11",
+    "bench:wal:12",
+    "bench:wal:13",
+    "bench:wal:14",
+    "bench:wal:15",
+};
 
 var bench_metrics_config: types.MetricsConfig = types.default_metrics_config();
 var steady_put_db: ?*engine.Database = null;
@@ -90,6 +110,25 @@ const PutSteadyBenchmark = struct {
         const db = steady_put_db orelse unreachable;
         const value = types.Value{ .integer = 2 };
         db.put("bench:put", &value) catch unreachable;
+    }
+};
+
+const PutGroupSteadyBenchmark = struct {
+    pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
+        _ = allocator;
+        const db = steady_put_db orelse unreachable;
+
+        var values: [put_group_item_count]types.Value = undefined;
+        var writes: [put_group_item_count]types.PutWrite = undefined;
+        var key_storage: [put_group_item_count][24]u8 = undefined;
+
+        for (0..put_group_item_count) |i| {
+            values[i] = .{ .integer = @intCast(i) };
+            const key = std.fmt.bufPrint(&key_storage[i], "bench:put:group:{d:0>2}", .{i}) catch unreachable;
+            writes[i] = .{ .key = key, .value = &values[i] };
+        }
+
+        db.put_group(&writes) catch unreachable;
     }
 };
 
@@ -294,6 +333,22 @@ const WalAppendBenchmark = struct {
     }
 };
 
+const WalAppendGroupedBenchmark = struct {
+    pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
+        _ = allocator;
+        const wal = if (steady_wal) |*w| w else unreachable;
+
+        const value = types.Value{ .integer = 42 };
+        var writes: [wal_group_item_count]internal.wal.PutBatchWrite = undefined;
+
+        for (0..wal_group_item_count) |i| {
+            writes[i] = .{ .key = wal_group_keys[i], .value = &value };
+        }
+
+        wal.append_put_group(&writes) catch unreachable;
+    }
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -356,6 +411,24 @@ fn print_throughput_summary(
         }
     }.run, allocator);
 
+    try run_and_print_throughput(writer, "put_group16 steady", iterations, put_group_item_count, struct {
+        fn run(_: std.mem.Allocator) void {
+            const db = steady_put_db orelse unreachable;
+
+            var values: [put_group_item_count]types.Value = undefined;
+            var writes: [put_group_item_count]types.PutWrite = undefined;
+            var key_storage: [put_group_item_count][24]u8 = undefined;
+
+            for (0..put_group_item_count) |i| {
+                values[i] = .{ .integer = @intCast(i) };
+                const key = std.fmt.bufPrint(&key_storage[i], "bench:put:group:{d:0>2}", .{i}) catch unreachable;
+                writes[i] = .{ .key = key, .value = &values[i] };
+            }
+
+            db.put_group(&writes) catch unreachable;
+        }
+    }.run, allocator);
+
     try run_and_print_throughput(writer, "get steady", iterations, 1, struct {
         fn run(alloc: std.mem.Allocator) void {
             const db = steady_get_db orelse unreachable;
@@ -415,6 +488,21 @@ fn print_throughput_summary(
             const wal = if (steady_wal) |*w| w else unreachable;
             const value = types.Value{ .integer = 42 };
             wal.append_put("bench:wal", &value) catch unreachable;
+        }
+    }.run, allocator);
+
+    try run_and_print_throughput(writer, "wal append grouped16", iterations, wal_group_item_count, struct {
+        fn run(_: std.mem.Allocator) void {
+            const wal = if (steady_wal) |*w| w else unreachable;
+
+            const value = types.Value{ .integer = 42 };
+            var writes: [wal_group_item_count]internal.wal.PutBatchWrite = undefined;
+
+            for (0..wal_group_item_count) |i| {
+                writes[i] = .{ .key = wal_group_keys[i], .value = &value };
+            }
+
+            wal.append_put_group(&writes) catch unreachable;
         }
     }.run, allocator);
 
@@ -821,6 +909,7 @@ fn run_bench_suite(
 
     const put_fresh = PutFreshBenchmark{};
     const put_steady = PutSteadyBenchmark{};
+    const put_group_steady = PutGroupSteadyBenchmark{};
     const get_existing = GetExistingBenchmark{};
     const get_existing_steady = GetExistingSteadyBenchmark{};
     const scan_prefix = ScanPrefixBenchmark{};
@@ -837,6 +926,7 @@ fn run_bench_suite(
 
     try stable_bench.addParam("put isolated", &put_fresh, .{});
     try stable_bench.addParam("put steady", &put_steady, .{});
+    try stable_bench.addParam("put_group16 steady", &put_group_steady, .{});
     try stable_bench.addParam("get isolated", &get_existing, .{});
     try stable_bench.addParam("get steady", &get_existing_steady, .{});
     try stable_bench.addParam("scan256 isolated", &scan_prefix, .{});
@@ -855,6 +945,7 @@ fn run_bench_suite(
     try stable_bench.addParam("art lookup", &ArtLookupBenchmark{}, .{});
     try stable_bench.addParam("art insert", &ArtInsertBenchmark{}, .{});
     try stable_bench.addParam("wal append", &WalAppendBenchmark{}, .{});
+    try stable_bench.addParam("wal append grouped16", &WalAppendGroupedBenchmark{}, .{});
 
     try print_metrics_config(writer, metrics_config);
     try stable_bench.run(writer);

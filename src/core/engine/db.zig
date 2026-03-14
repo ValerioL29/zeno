@@ -82,6 +82,21 @@ pub const Database = struct {
         return metrics.call_with_latency(&self.state, write.put, .{ &self.state, key, value });
     }
 
+    /// Writes multiple plain key/value pairs as independent standalone mutations.
+    ///
+    /// Time Complexity: O(n * (k + v) + s * n), where `n` is `writes.len`, `k` is average key length, `v` is value clone cost, and `s` is shard count.
+    ///
+    /// Allocator: Clones owned key and value storage through shard arenas and may allocate delegated WAL serialization scratch when durability is enabled.
+    ///
+    /// Ownership: Clones each `writes[i].value` into engine-owned storage before returning.
+    ///
+    /// Thread Safety: Safe for concurrent use with reads and scans; acquires shard-local shared visibility gates and shard-exclusive locks per touched shard.
+    ///
+    /// Durability Semantics: Non-atomic as a group. On failure, any durable/live prefix applied before the failure may remain.
+    pub fn put_group(self: *Database, writes: []const types.PutWrite) EngineError!void {
+        return metrics.call_with_latency(&self.state, write.put_group, .{ &self.state, writes });
+    }
+
     /// Deletes one plain key from the engine contract surface.
     ///
     /// Time Complexity: O(n + k), where `n` is `key.len` for shard routing and `k` is ART lookup and removal work.
@@ -1068,6 +1083,58 @@ test "put leaves state unchanged when wal append fails" {
     storage_wal.test_hooks.failNextWrite();
     try testing.expectError(error.PersistenceIoFailure, db.put("wal:put", &value));
     try testing.expect((try db.get(testing.allocator, "wal:put")) == null);
+}
+
+test "put_group writes all provided entries" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const one = types.Value{ .integer = 1 };
+    const two = types.Value{ .string = "two" };
+    const three = types.Value{ .boolean = true };
+
+    try db.put_group(&.{
+        .{ .key = "group:one", .value = &one },
+        .{ .key = "group:two", .value = &two },
+        .{ .key = "group:three", .value = &three },
+    });
+
+    var got_one = (try db.get(testing.allocator, "group:one")).?;
+    defer got_one.deinit(testing.allocator);
+    var got_two = (try db.get(testing.allocator, "group:two")).?;
+    defer got_two.deinit(testing.allocator);
+    var got_three = (try db.get(testing.allocator, "group:three")).?;
+    defer got_three.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i64, 1), got_one.integer);
+    try testing.expectEqualStrings("two", got_two.string);
+    try testing.expect(got_three.boolean);
+}
+
+test "put_group keeps state unchanged when wal append fails" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step6-put-group-failure.wal");
+    defer testing.allocator.free(path);
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+    try attach_test_wal(db, path, .none);
+
+    const value = types.Value{ .string = "value" };
+    storage_wal.test_hooks.failNextWrite();
+    try testing.expectError(error.PersistenceIoFailure, db.put_group(&.{
+        .{ .key = "wal:group:1", .value = &value },
+        .{ .key = "wal:group:2", .value = &value },
+    }));
+
+    try testing.expect((try db.get(testing.allocator, "wal:group:1")) == null);
+    try testing.expect((try db.get(testing.allocator, "wal:group:2")) == null);
 }
 
 test "delete returns a durability error and keeps the key when wal append fails" {

@@ -9,10 +9,7 @@ const storage_wal = @import("../storage/wal.zig");
 const types = @import("../types.zig");
 
 /// One borrowed plain-key write forwarded into a WAL put-batch envelope.
-pub const PutBatchWrite = struct {
-    key: []const u8,
-    value: *const types.Value,
-};
+pub const PutBatchWrite = storage_wal.PutBatchWrite;
 
 /// Appends one live PUT mutation when WAL is configured.
 ///
@@ -26,6 +23,21 @@ pub fn append_put_if_enabled(
 ) error_mod.EngineError!void {
     if (state.wal) |*wal| {
         wal.append_put(key, value) catch |err| return error_mod.map_persistence_error(err);
+    }
+}
+
+/// Appends multiple live standalone PUT mutations when WAL is configured.
+///
+/// Time Complexity: O(n * (k + v)), where `n` is `writes.len`.
+///
+/// Allocator: Does not allocate outside delegated WAL scratch.
+pub fn append_put_group_if_enabled(
+    state: *runtime_state.DatabaseState,
+    writes: []const PutBatchWrite,
+) error_mod.EngineError!void {
+    if (writes.len == 0) return;
+    if (state.wal) |*wal| {
+        wal.append_put_group(writes) catch |err| return error_mod.map_persistence_error(err);
     }
 }
 
@@ -65,18 +77,9 @@ pub fn append_put_batch_if_enabled(
     allocator: std.mem.Allocator,
     writes: []const PutBatchWrite,
 ) error_mod.EngineError!void {
+    _ = allocator;
     if (writes.len == 0) return;
     const wal = if (state.wal) |*owned_wal| owned_wal else return;
 
-    const wal_writes = allocator.alloc(storage_wal.PutBatchWrite, writes.len) catch return error.OutOfMemory;
-    defer allocator.free(wal_writes);
-
-    for (writes, 0..) |write, index| {
-        wal_writes[index] = .{
-            .key = write.key,
-            .value = write.value,
-        };
-    }
-
-    _ = wal.append_put_batch(wal_writes) catch |err| return error_mod.map_persistence_error(err);
+    _ = wal.append_put_batch(writes) catch |err| return error_mod.map_persistence_error(err);
 }

@@ -24,11 +24,18 @@ const tag_batch_begin: u8 = 0x05;
 /// Record tag for multi-record batch commit markers.
 const tag_batch_commit: u8 = 0x06;
 
+// Keep scalar tags in sync with core/internal/codec.zig value encoding.
+const scalar_tag_null: u8 = 0x00;
+const scalar_tag_bool: u8 = 0x01;
+const scalar_tag_int: u8 = 0x02;
+const scalar_tag_float: u8 = 0x03;
+
 /// Fixed payload length for one batch BEGIN marker.
 const batch_begin_payload_len: usize = 4;
 
 /// Fixed payload length for one batch COMMIT marker.
 const batch_commit_payload_len: usize = 12;
+const small_record_stack_capacity: usize = 256;
 
 /// Maximum nesting depth allowed in durability payload encoding.
 pub const MAX_DEPTH: usize = codec.MAX_DEPTH;
@@ -182,11 +189,82 @@ pub const Wal = struct {
     ///
     /// Thread Safety: Serializes with other append and close operations through the internal WAL mutex.
     pub fn append_put(self: *Wal, key: []const u8, value: *const Value) !void {
+        var scalar_buf: [9]u8 = undefined;
+        if (encode_scalar_value_inline(value, &scalar_buf)) |encoded_scalar| {
+            _ = try self.append_record(tag_put, key, encoded_scalar);
+            return;
+        }
+
         var value_buf = std.ArrayList(u8).empty;
         defer value_buf.deinit(self.allocator);
 
         try codec.serialize_value(self.allocator, value, &value_buf, 0);
         _ = try self.append_record(tag_put, key, value_buf.items);
+    }
+
+    /// Appends multiple standalone PUT records in one serialized WAL write.
+    ///
+    /// Time Complexity: O(n * (k + v)), where `n` is `writes.len`.
+    ///
+    /// Allocator: Uses `self.allocator` for temporary envelope and serialization scratch.
+    ///
+    /// Ownership: Borrows `writes` members for the duration of the call only.
+    ///
+    /// Thread Safety: Serializes with other append and close operations through the internal WAL mutex.
+    pub fn append_put_group(self: *Wal, writes: []const PutBatchWrite) !void {
+        if (writes.len == 0) return;
+
+        var envelope = std.ArrayList(u8).empty;
+        defer envelope.deinit(self.allocator);
+        var records = std.ArrayList(EncodedAppendRecord).empty;
+        defer records.deinit(self.allocator);
+        try records.ensureTotalCapacityPrecise(self.allocator, writes.len);
+
+        var value_buf = std.ArrayList(u8).empty;
+        defer value_buf.deinit(self.allocator);
+
+        for (writes) |write| {
+            var scalar_buf: [9]u8 = undefined;
+            const encoded_value = if (encode_scalar_value_inline(write.value, &scalar_buf)) |encoded_scalar|
+                encoded_scalar
+            else blk: {
+                value_buf.clearRetainingCapacity();
+                try codec.serialize_value(self.allocator, write.value, &value_buf, 0);
+                break :blk value_buf.items;
+            };
+
+            try records.append(self.allocator, try append_encoded_record_placeholder(
+                self.allocator,
+                &envelope,
+                tag_put,
+                write.key,
+                encoded_value,
+            ));
+        }
+
+        if (self.fsync_mode == .batched_async and self.state.flush_error.load(.acquire) != 0) {
+            return error.WalFlushFailed;
+        }
+
+        self.state.mutex.lock();
+        defer self.state.mutex.unlock();
+
+        if (self.fsync_mode == .batched_async and self.state.flush_error.load(.acquire) != 0) {
+            return error.WalFlushFailed;
+        }
+
+        for (records.items) |record| {
+            const lsn = self.next_lsn;
+            self.next_lsn += 1;
+            patch_encoded_record(envelope.items, record, lsn);
+        }
+
+        const last_lsn = self.next_lsn - 1;
+        try write_all_tracked(self.state.file, envelope.items);
+        _ = self.state.bytes_written_total.fetchAdd(envelope.items.len, .monotonic);
+        self.state.last_appended_lsn.store(last_lsn, .release);
+        self.state.dirty.store(true, .release);
+        try self.maybe_fsync_inline(last_lsn);
     }
 
     /// Appends a DELETE record to the WAL before a live in-memory publication.
@@ -473,6 +551,19 @@ pub const Wal = struct {
         const lsn = self.next_lsn;
         self.next_lsn += 1;
 
+        const encoded_len = encoded_record_len(key.len, value_bytes.len);
+        if (encoded_len <= small_record_stack_capacity) {
+            var stack_record: [small_record_stack_capacity]u8 = undefined;
+            const encoded = encode_record_into(stack_record[0..], lsn, tag, key, value_bytes);
+
+            try write_all_tracked(self.state.file, encoded);
+            _ = self.state.bytes_written_total.fetchAdd(encoded.len, .monotonic);
+            self.state.last_appended_lsn.store(lsn, .release);
+            self.state.dirty.store(true, .release);
+            try self.maybe_fsync_inline(lsn);
+            return lsn;
+        }
+
         try buf.appendNTimes(self.allocator, 0, 4);
         try write_u64_le(self.allocator, &buf, lsn);
         try buf.append(self.allocator, tag);
@@ -492,6 +583,63 @@ pub const Wal = struct {
         return lsn;
     }
 };
+
+fn encode_scalar_value_inline(value: *const Value, out: *[9]u8) ?[]const u8 {
+    return switch (value.*) {
+        .null_val => blk: {
+            out[0] = scalar_tag_null;
+            break :blk out[0..1];
+        },
+        .boolean => |payload| blk: {
+            out[0] = scalar_tag_bool;
+            out[1] = if (payload) 1 else 0;
+            break :blk out[0..2];
+        },
+        .integer => |payload| blk: {
+            out[0] = scalar_tag_int;
+            std.mem.writeInt(i64, @ptrCast(out[1..9]), payload, .little);
+            break :blk out[0..9];
+        },
+        .float => |payload| blk: {
+            out[0] = scalar_tag_float;
+            std.mem.writeInt(u64, @ptrCast(out[1..9]), @bitCast(payload), .little);
+            break :blk out[0..9];
+        },
+        else => null,
+    };
+}
+
+fn encoded_record_len(key_len: usize, value_len: usize) usize {
+    return 19 + key_len + value_len;
+}
+
+fn encode_record_into(dst: []u8, lsn: u64, tag: u8, key: []const u8, value_bytes: []const u8) []u8 {
+    const len = encoded_record_len(key.len, value_bytes.len);
+    std.debug.assert(dst.len >= len);
+
+    var cursor: usize = 4;
+    std.mem.writeInt(u64, @ptrCast(dst[cursor .. cursor + 8]), lsn, .little);
+    cursor += 8;
+
+    dst[cursor] = tag;
+    cursor += 1;
+
+    std.mem.writeInt(u16, @ptrCast(dst[cursor .. cursor + 2]), @intCast(key.len), .little);
+    cursor += 2;
+
+    @memcpy(dst[cursor .. cursor + key.len], key);
+    cursor += key.len;
+
+    std.mem.writeInt(u32, @ptrCast(dst[cursor .. cursor + 4]), @intCast(value_bytes.len), .little);
+    cursor += 4;
+
+    @memcpy(dst[cursor .. cursor + value_bytes.len], value_bytes);
+    cursor += value_bytes.len;
+
+    const crc = std.hash.crc.Crc32.hash(dst[4..cursor]);
+    std.mem.writeInt(u32, @ptrCast(dst[0..4]), crc, .little);
+    return dst[0..cursor];
+}
 
 /// Opens a WAL handle and replays any surviving WAL prefix before returning.
 ///
@@ -1029,6 +1177,51 @@ test "append point records writes put delete and expire tags" {
     defer testing.allocator.free(tags);
 
     try testing.expectEqualSlices(u8, &.{ tag_put, tag_delete, tag_expire }, tags);
+}
+
+test "append_put_group writes standalone put records in order" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step6-group-puts.wal");
+    defer testing.allocator.free(path);
+
+    {
+        var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+        defer wal.close();
+
+        const one = Value{ .integer = 1 };
+        const two = Value{ .string = "hello" };
+        const three = Value{ .boolean = true };
+        try wal.append_put_group(&.{
+            .{ .key = "alpha", .value = &one },
+            .{ .key = "beta", .value = &two },
+            .{ .key = "gamma", .value = &three },
+        });
+    }
+
+    const replay_file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
+    defer replay_file.close();
+
+    var collector = ReplayCollector.init(testing.allocator);
+    defer collector.deinit();
+
+    const result = try storage_replay.replay(collector.applier(), testing.allocator, replay_file, 0);
+    try testing.expectEqual(@as(u64, 3), result.last_lsn);
+    try testing.expectEqual(@as(usize, 3), result.records_applied);
+    try testing.expectEqual(@as(usize, 3), collector.events.items.len);
+    try testing.expectEqualStrings("alpha", collector.events.items[0].key);
+    try testing.expectEqualStrings("beta", collector.events.items[1].key);
+    try testing.expectEqualStrings("gamma", collector.events.items[2].key);
+
+    const bytes = try read_all_test(testing.allocator, path);
+    defer testing.allocator.free(bytes);
+
+    const tags = try collect_record_tags_test(testing.allocator, bytes);
+    defer testing.allocator.free(tags);
+    try testing.expectEqualSlices(u8, &.{ tag_put, tag_put, tag_put }, tags);
 }
 
 test "replay restores committed put batch atomically and in order" {

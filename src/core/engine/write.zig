@@ -2,6 +2,7 @@
 //! Cost: O(n + k + v) for writes, where `n` is key length for shard routing, `k` is ART traversal work, and `v` is cloned value size.
 //! Allocator: Uses the shard arena model for committed point-write ownership.
 
+const std = @import("std");
 const durability = @import("durability.zig");
 const expiration = @import("expiration.zig");
 const error_mod = @import("error.zig");
@@ -39,6 +40,55 @@ pub fn put(state: *runtime_state.DatabaseState, key: []const u8, value: *const t
     try internal_mutate.upsert_value_unlocked(shard, key, value);
     internal_ttl_index.clear_ttl_entry(shard, key);
     state.record_operation(.put, 1);
+}
+
+/// Applies multiple plain key/value writes as independent standalone mutations.
+///
+/// Time Complexity: O(n * (k + v) + s * n), where `n` is `writes.len`, `k` is average key length, `v` is clone cost, and `s` is shard count.
+///
+/// Allocator: Clones owned key and value storage through touched shard arenas and may allocate delegated WAL serialization scratch when durability is enabled.
+///
+/// Ownership: Clones each write value into shard-owned storage before returning.
+///
+/// Thread Safety: Safe for concurrent use with reads and scans; acquires shard-local shared visibility gates and shard-exclusive locks per touched shard.
+///
+/// Durability Semantics: Writes are non-atomic as a group. Replays may recover any durable prefix if a failure happens mid-apply.
+pub fn put_group(state: *runtime_state.DatabaseState, writes: []const types.PutWrite) error_mod.EngineError!void {
+    if (writes.len == 0) return;
+
+    var wal_writes = state.base_allocator.alloc(durability.PutBatchWrite, writes.len) catch return error.OutOfMemory;
+    defer state.base_allocator.free(wal_writes);
+
+    var touched = std.StaticBitSet(runtime_shard.NUM_SHARDS).initEmpty();
+    for (writes, 0..) |write_entry, i| {
+        if (write_entry.key.len == 0 or write_entry.key.len > MAX_KEY_LEN) return error.KeyTooLarge;
+        wal_writes[i] = .{ .key = write_entry.key, .value = write_entry.value };
+        touched.set(runtime_shard.get_shard_index(write_entry.key));
+    }
+
+    try durability.append_put_group_if_enabled(state, wal_writes);
+
+    var applied: u64 = 0;
+    for (0..runtime_shard.NUM_SHARDS) |shard_idx| {
+        if (!touched.isSet(shard_idx)) continue;
+
+        const shard = &state.shards[shard_idx];
+        shard.visibility_gate.lock_shared();
+        shard.lock.lock();
+
+        for (writes) |write_entry| {
+            if (runtime_shard.get_shard_index(write_entry.key) != shard_idx) continue;
+            try internal_mutate.upsert_value_unlocked(shard, write_entry.key, write_entry.value);
+            internal_ttl_index.clear_ttl_entry(shard, write_entry.key);
+            applied += 1;
+        }
+
+        shard.lock.unlock();
+        shard.visibility_gate.unlock_shared();
+    }
+
+    if (applied != @as(u64, @intCast(writes.len))) unreachable;
+    state.record_operation(.put, applied);
 }
 
 /// Deletes one plain key/value pair when present.
