@@ -51,9 +51,9 @@ pub const Database = struct {
     /// Ownership: Returns `error.NoSnapshotPath` when `snapshot_path` was not configured for this engine handle.
     ///
     /// Thread Safety: Not safe to call concurrently with other mutation of the same engine handle.
-    /// Active `ReadView` handles may delay the brief checkpoint barrier before it begins, then
-    /// writers and new readers are blocked globally during that barrier and writers are blocked
-    /// globally again during each shard-serialization window.
+    /// Active `ReadView` handles may cause one fail-fast `error.CheckpointBusy` response while
+    /// the barrier cannot be acquired, then writers and new readers are blocked globally during
+    /// the barrier once acquired and writers are blocked globally again during each shard-serialization window.
     pub fn checkpoint(self: *Database) EngineError!void {
         return metrics.call_with_latency(&self.state, lifecycle.checkpoint, .{self});
     }
@@ -726,6 +726,7 @@ test "checkpoint without a configured snapshot path returns no snapshot path" {
     const stats = db.state.stats_snapshot();
     try testing.expectEqual(@as(u64, 1), stats.latency_samples_total);
     try testing.expectEqual(@as(u64, 0), stats.checkpoint_count_total);
+    try testing.expectEqual(@as(u64, 0), stats.checkpoint_busy_total);
     try testing.expectEqual(@as(u64, 0), stats.checkpoint_duration_last_ms);
     try testing.expectEqual(@as(u64, 0), stats.checkpoint_lsn_last);
 }
@@ -753,6 +754,7 @@ test "checkpoint writes a snapshot and reopens the same visible state" {
         try db.checkpoint();
         const stats = db.state.stats_snapshot();
         try testing.expectEqual(@as(u64, 1), stats.checkpoint_count_total);
+        try testing.expectEqual(@as(u64, 0), stats.checkpoint_busy_total);
         try testing.expectEqual(@as(u64, 0), stats.checkpoint_lsn_last);
     }
 
@@ -1313,6 +1315,90 @@ test "read view holds the visibility gate until released" {
     view.deinit();
     try testing.expect(try_lock_all_shard_visibility_gates_exclusive_for_test(db));
     unlock_all_shard_visibility_gates_exclusive_for_test(db);
+}
+
+test "checkpoint returns busy while a read view holds global visibility gates" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "checkpoint-busy-read-view.snapshot");
+    defer testing.allocator.free(snapshot_path);
+
+    const db = try open(testing.allocator, .{
+        .snapshot_path = snapshot_path,
+    });
+    defer db.close() catch unreachable;
+
+    var view = try db.read_view();
+    defer view.deinit();
+
+    try testing.expectError(error.CheckpointBusy, db.checkpoint());
+
+    const stats = db.state.stats_snapshot();
+    try testing.expectEqual(@as(u64, 1), stats.checkpoint_busy_total);
+    try testing.expectEqual(@as(u64, 0), stats.checkpoint_count_total);
+}
+
+test "checkpoint succeeds after read view release following busy result" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "checkpoint-busy-then-success.snapshot");
+    defer testing.allocator.free(snapshot_path);
+
+    const db = try open(testing.allocator, .{
+        .snapshot_path = snapshot_path,
+    });
+    defer db.close() catch unreachable;
+
+    {
+        var view = try db.read_view();
+        defer view.deinit();
+
+        try testing.expectError(error.CheckpointBusy, db.checkpoint());
+    }
+
+    try db.checkpoint();
+    const stats = db.state.stats_snapshot();
+    try testing.expectEqual(@as(u64, 1), stats.checkpoint_busy_total);
+    try testing.expectEqual(@as(u64, 1), stats.checkpoint_count_total);
+}
+
+test "concurrent checkpoint attempts while read view held report busy" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "checkpoint-busy-concurrent.snapshot");
+    defer testing.allocator.free(snapshot_path);
+
+    const db = try open(testing.allocator, .{
+        .snapshot_path = snapshot_path,
+    });
+    defer db.close() catch unreachable;
+
+    var view = try db.read_view();
+    defer view.deinit();
+
+    var state_a = CheckpointThreadState{ .db = db };
+    var state_b = CheckpointThreadState{ .db = db };
+
+    const thread_a = try std.Thread.spawn(.{}, run_checkpoint_in_thread, .{&state_a});
+    const thread_b = try std.Thread.spawn(.{}, run_checkpoint_in_thread, .{&state_b});
+    thread_a.join();
+    thread_b.join();
+
+    try testing.expectEqual(@as(?EngineError, error.CheckpointBusy), state_a.checkpoint_error);
+    try testing.expectEqual(@as(?EngineError, error.CheckpointBusy), state_b.checkpoint_error);
+
+    const stats = db.state.stats_snapshot();
+    try testing.expectEqual(@as(u64, 2), stats.checkpoint_busy_total);
+    try testing.expectEqual(@as(u64, 0), stats.checkpoint_count_total);
 }
 
 test "read view copies release the visibility gate only once" {

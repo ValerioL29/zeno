@@ -8,6 +8,7 @@ pub const EngineError = error{
     OutOfMemory,
     KeyTooLarge,
     NoSnapshotPath,
+    CheckpointBusy,
     ActiveReadViews,
     ValueTooLarge,
     ValueTooDeep,

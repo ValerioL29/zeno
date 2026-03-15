@@ -133,13 +133,16 @@ pub fn close(db: *Database) EngineError!void {
 ///
 /// Ownership: Returns `error.NoSnapshotPath` when `snapshot_path` was not configured for this engine handle.
 ///
-/// Thread Safety: Not thread-safe; caller must ensure exclusive ownership of the engine handle. Writers and new readers are blocked globally during the brief checkpoint barrier, active `ReadView` handles holding the shared visibility gate may delay that barrier, and writers are blocked globally again during each shard-serialization window.
+/// Thread Safety: Not thread-safe; caller must ensure exclusive ownership of the engine handle. Writers and new readers are blocked globally during the brief checkpoint barrier, active `ReadView` handles holding the shared visibility gate cause one fail-fast `error.CheckpointBusy` response instead of waiting, and writers are blocked globally again during each shard-serialization window.
 pub fn checkpoint(db: *Database) EngineError!void {
     var checkpoint_timer = std.time.Timer.start() catch unreachable;
     const snapshot_path = db.state.snapshot_path orelse return error.NoSnapshotPath;
 
     notify_checkpoint_barrier_attempt_for_test();
-    db.state.lock_all_shards_exclusive();
+    if (!db.state.try_lock_all_shards_exclusive()) {
+        db.state.record_busy_checkpoint();
+        return error.CheckpointBusy;
+    }
     notify_checkpoint_barrier_acquired_for_test();
 
     for (&db.state.shards) |*shard| shard.lock.lock();

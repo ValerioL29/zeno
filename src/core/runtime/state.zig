@@ -26,6 +26,7 @@ pub const StatsCounters = struct {
     latency_ge_1ms_total: u64,
     latency_samples_total: u64,
     checkpoint_count_total: u64,
+    checkpoint_busy_total: u64,
     checkpoint_duration_last_ms: u64,
     checkpoint_lsn_last: u64,
     snapshot_corruption_fallback_total: u64,
@@ -45,6 +46,7 @@ pub const RuntimeCounters = struct {
     latency_ge_1ms_total: std.atomic.Value(u64),
     latency_samples_total: std.atomic.Value(u64),
     checkpoint_count_total: std.atomic.Value(u64),
+    checkpoint_busy_total: std.atomic.Value(u64),
     checkpoint_duration_last_ms: std.atomic.Value(u64),
     checkpoint_lsn_last: std.atomic.Value(u64),
     snapshot_corruption_fallback_total: std.atomic.Value(u64),
@@ -63,6 +65,7 @@ pub const RuntimeCounters = struct {
             .latency_ge_1ms_total = std.atomic.Value(u64).init(0),
             .latency_samples_total = std.atomic.Value(u64).init(0),
             .checkpoint_count_total = std.atomic.Value(u64).init(0),
+            .checkpoint_busy_total = std.atomic.Value(u64).init(0),
             .checkpoint_duration_last_ms = std.atomic.Value(u64).init(0),
             .checkpoint_lsn_last = std.atomic.Value(u64).init(0),
             .snapshot_corruption_fallback_total = std.atomic.Value(u64).init(0),
@@ -177,6 +180,7 @@ pub const DatabaseState = struct {
             .latency_ge_1ms_total = self.counters.latency_ge_1ms_total.load(.monotonic),
             .latency_samples_total = self.counters.latency_samples_total.load(.monotonic),
             .checkpoint_count_total = self.counters.checkpoint_count_total.load(.monotonic),
+            .checkpoint_busy_total = self.counters.checkpoint_busy_total.load(.monotonic),
             .checkpoint_duration_last_ms = self.counters.checkpoint_duration_last_ms.load(.monotonic),
             .checkpoint_lsn_last = self.counters.checkpoint_lsn_last.load(.monotonic),
             .snapshot_corruption_fallback_total = self.counters.snapshot_corruption_fallback_total.load(.monotonic),
@@ -261,6 +265,17 @@ pub const DatabaseState = struct {
         @constCast(&self.counters.checkpoint_lsn_last).store(checkpoint_lsn, .monotonic);
     }
 
+    /// Records one fail-fast checkpoint attempt that could not acquire the global visibility barrier.
+    ///
+    /// Time Complexity: O(1).
+    ///
+    /// Allocator: Does not allocate.
+    ///
+    /// Thread Safety: Uses atomic increments only; safe to call from concurrent checkpoint callers.
+    pub fn record_busy_checkpoint(self: *const DatabaseState) void {
+        _ = @constCast(&self.counters.checkpoint_busy_total).fetchAdd(1, .monotonic);
+    }
+
     /// Increments the counter tracking snapshot-corruption fallbacks to full WAL replay.
     ///
     /// Time Complexity: O(1).
@@ -309,6 +324,29 @@ pub const DatabaseState = struct {
         }
     }
 
+    /// Attempts to acquire the exclusive side of all shard-local visibility gates.
+    ///
+    /// Time Complexity: O(s), where `s` is the shard count.
+    ///
+    /// Thread Safety: Thread-safe; acquires shard visibility gates in ascending index order
+    /// and releases any partial acquisition before returning `false`.
+    ///
+    /// TODO: Replace this global gate barrier with sequence/epoch-based visibility
+    /// so long-lived read views stop contending with checkpoint barriers.
+    pub fn try_lock_all_shards_exclusive(self: *const DatabaseState) bool {
+        var i: usize = 0;
+        while (i < NUM_SHARDS) : (i += 1) {
+            if (@constCast(&self.shards[i].visibility_gate).try_lock_exclusive()) continue;
+
+            var release_idx: usize = 0;
+            while (release_idx < i) : (release_idx += 1) {
+                @constCast(&self.shards[release_idx].visibility_gate).unlock_exclusive();
+            }
+            return false;
+        }
+        return true;
+    }
+
     /// Releases the exclusive side of all shard-local visibility gates.
     ///
     /// Time Complexity: O(s), where `s` is the shard count.
@@ -339,6 +377,7 @@ test "database state metrics start at zero" {
     try testing.expectEqual(@as(u64, 0), snapshot.ops_expire_total);
     try testing.expectEqual(@as(u64, 0), snapshot.latency_samples_total);
     try testing.expectEqual(@as(u64, 0), snapshot.checkpoint_count_total);
+    try testing.expectEqual(@as(u64, 0), snapshot.checkpoint_busy_total);
     try testing.expectEqual(@as(u64, 0), snapshot.checkpoint_duration_last_ms);
     try testing.expectEqual(@as(u64, 0), snapshot.checkpoint_lsn_last);
     try testing.expectEqual(@as(u64, 0), snapshot.snapshot_corruption_fallback_total);
@@ -415,6 +454,7 @@ test "database state full metrics snapshot reflects latency checkpoint and fallb
     state.record_latency_sample(500 * std.time.ns_per_us);
     state.record_latency_sample(2 * std.time.ns_per_ms);
     state.record_successful_checkpoint(12 * std.time.ns_per_ms, 33);
+    state.record_busy_checkpoint();
     state.record_snapshot_corruption_fallback();
 
     const snapshot = state.stats_snapshot();
@@ -425,6 +465,7 @@ test "database state full metrics snapshot reflects latency checkpoint and fallb
     try testing.expectEqual(@as(u64, 1), snapshot.latency_ge_1ms_total);
     try testing.expectEqual(@as(u64, 5), snapshot.latency_samples_total);
     try testing.expectEqual(@as(u64, 1), snapshot.checkpoint_count_total);
+    try testing.expectEqual(@as(u64, 1), snapshot.checkpoint_busy_total);
     try testing.expectEqual(@as(u64, 12), snapshot.checkpoint_duration_last_ms);
     try testing.expectEqual(@as(u64, 33), snapshot.checkpoint_lsn_last);
     try testing.expectEqual(@as(u64, 1), snapshot.snapshot_corruption_fallback_total);
