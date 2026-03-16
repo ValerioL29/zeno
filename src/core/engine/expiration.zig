@@ -21,6 +21,7 @@ const TtlCleanup = enum {
 ///
 /// Allocator: Does not allocate.
 pub fn key_is_visible_unlocked(shard: *const runtime_shard.Shard, key: []const u8, now: i64) bool {
+    if (shard.ttl_index.count() == 0) return true;
     const stored_expire_at = internal_ttl_index.get_expire_at(shard, key) orelse return true;
     return !is_expired(stored_expire_at, now);
 }

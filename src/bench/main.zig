@@ -45,6 +45,7 @@ var bench_metrics_config: types.MetricsConfig = types.default_metrics_config();
 var steady_put_db: ?*engine.Database = null;
 var steady_put_heavy_manual_db: ?*engine.Database = null;
 var steady_get_db: ?*engine.Database = null;
+var steady_get_ttl_mixed_db: ?*engine.Database = null;
 var steady_scan_db: ?*engine.Database = null;
 var steady_scan_view: ?types.ReadView = null;
 var steady_scan_large_db: ?*engine.Database = null;
@@ -59,6 +60,7 @@ var steady_put_overwrite_seed = std.atomic.Value(usize).init(0);
 var steady_put_overwrite_heavy_seed = std.atomic.Value(usize).init(0);
 var steady_put_overwrite_heavy_manual_seed = std.atomic.Value(usize).init(0);
 var steady_put_overwrite_heavy_manual_ops = std.atomic.Value(usize).init(0);
+var steady_get_ttl_mixed_seed = std.atomic.Value(usize).init(0);
 
 var steady_art_tree: ?internal.art.Tree = null;
 var steady_wal: ?internal.wal.Wal = null;
@@ -219,6 +221,31 @@ const GetExistingSteadyBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
         const db = steady_get_db orelse unreachable;
         var stored = (db.get(allocator, "bench:get") catch unreachable).?;
+        defer stored.deinit(allocator);
+        std.mem.doNotOptimizeAway(stored.integer);
+    }
+};
+
+const GetExistingSteadyTtlMixedBenchmark = struct {
+    pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
+        const db = steady_get_ttl_mixed_db orelse unreachable;
+        const key_idx = steady_get_ttl_mixed_seed.fetchAdd(1, .monotonic) % 10;
+
+        const key = switch (key_idx) {
+            0 => "bench:get:ttl-mixed:0",
+            1 => "bench:get:ttl-mixed:1",
+            2 => "bench:get:ttl-mixed:2",
+            3 => "bench:get:ttl-mixed:3",
+            4 => "bench:get:ttl-mixed:4",
+            5 => "bench:get:ttl-mixed:5",
+            6 => "bench:get:ttl-mixed:6",
+            7 => "bench:get:ttl-mixed:7",
+            8 => "bench:get:ttl-mixed:8",
+            9 => "bench:get:ttl-mixed:9",
+            else => unreachable,
+        };
+
+        var stored = (db.get(allocator, key) catch unreachable).?;
         defer stored.deinit(allocator);
         std.mem.doNotOptimizeAway(stored.integer);
     }
@@ -552,6 +579,31 @@ fn print_throughput_summary(
         fn run(alloc: std.mem.Allocator) void {
             const db = steady_get_db orelse unreachable;
             var stored = (db.get(alloc, "bench:get") catch unreachable).?;
+            defer stored.deinit(alloc);
+            std.mem.doNotOptimizeAway(stored.integer);
+        }
+    }.run, allocator);
+
+    try run_and_print_throughput(writer, "get steady ttl-mixed10", iterations, 1, struct {
+        fn run(alloc: std.mem.Allocator) void {
+            const db = steady_get_ttl_mixed_db orelse unreachable;
+            const key_idx = steady_get_ttl_mixed_seed.fetchAdd(1, .monotonic) % 10;
+
+            const key = switch (key_idx) {
+                0 => "bench:get:ttl-mixed:0",
+                1 => "bench:get:ttl-mixed:1",
+                2 => "bench:get:ttl-mixed:2",
+                3 => "bench:get:ttl-mixed:3",
+                4 => "bench:get:ttl-mixed:4",
+                5 => "bench:get:ttl-mixed:5",
+                6 => "bench:get:ttl-mixed:6",
+                7 => "bench:get:ttl-mixed:7",
+                8 => "bench:get:ttl-mixed:8",
+                9 => "bench:get:ttl-mixed:9",
+                else => unreachable,
+            };
+
+            var stored = (db.get(alloc, key) catch unreachable).?;
             defer stored.deinit(alloc);
             std.mem.doNotOptimizeAway(stored.integer);
         }
@@ -1162,6 +1214,7 @@ fn run_bench_suite(
     const put_group_steady = PutGroupSteadyBenchmark{};
     const get_existing = GetExistingBenchmark{};
     const get_existing_steady = GetExistingSteadyBenchmark{};
+    const get_existing_steady_ttl_mixed = GetExistingSteadyTtlMixedBenchmark{};
     const scan_prefix = ScanPrefixBenchmark{};
     const scan_prefix_steady = ScanPrefixSteadyBenchmark{};
     const scan_prefix_in_view_steady = ScanPrefixInViewSteadyBenchmark{};
@@ -1182,6 +1235,7 @@ fn run_bench_suite(
     try stable_bench.addParam("put_group16 steady", &put_group_steady, .{});
     try stable_bench.addParam("get isolated", &get_existing, .{});
     try stable_bench.addParam("get steady", &get_existing_steady, .{});
+    try stable_bench.addParam("get steady ttl-mixed10", &get_existing_steady_ttl_mixed, .{});
     try stable_bench.addParam("scan256 isolated", &scan_prefix, .{});
     try stable_bench.addParam("scan256 steady", &scan_prefix_steady, .{});
     try stable_bench.addParam("scan64 in-view steady", &scan_prefix_in_view_steady, .{});
@@ -1258,6 +1312,18 @@ fn init_steady_state_benches() !void {
     {
         const value = types.Value{ .integer = 42 };
         try steady_get_db.?.put("bench:get", &value);
+    }
+
+    steady_get_ttl_mixed_db = try open_bench_db(std.heap.page_allocator);
+    {
+        var key_buf: [32]u8 = undefined;
+        for (0..10) |i| {
+            const key = try std.fmt.bufPrint(&key_buf, "bench:get:ttl-mixed:{d}", .{i});
+            const value = types.Value{ .integer = @intCast(i) };
+            try steady_get_ttl_mixed_db.?.put(key, &value);
+        }
+        _ = try steady_get_ttl_mixed_db.?.expire_at("bench:get:ttl-mixed:0", internal.runtime_shard.unix_now() + 3600);
+        steady_get_ttl_mixed_seed.store(0, .monotonic);
     }
 
     steady_scan_db = try open_bench_db(std.heap.page_allocator);
@@ -1368,6 +1434,10 @@ fn deinit_steady_state_benches() void {
     if (steady_get_db) |db| {
         db.close() catch unreachable;
         steady_get_db = null;
+    }
+    if (steady_get_ttl_mixed_db) |db| {
+        db.close() catch unreachable;
+        steady_get_ttl_mixed_db = null;
     }
     if (steady_put_heavy_manual_db) |db| {
         db.close() catch unreachable;

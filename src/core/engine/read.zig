@@ -23,7 +23,6 @@ fn clone_plain_value_no_visibility(
     state: *const runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
     key: []const u8,
-    now: i64,
 ) error_mod.EngineError!?types.Value {
     const shard_idx = runtime_shard.get_shard_index(key);
     const shard = @constCast(&state.shards[shard_idx]);
@@ -33,7 +32,10 @@ fn clone_plain_value_no_visibility(
     state.record_operation(.get, 1);
 
     const stored = shard.tree.lookup(key) orelse return null;
-    if (!expiration.key_is_visible_unlocked(shard, key, now)) return null;
+    if (shard.ttl_index.count() != 0) {
+        const now = runtime_shard.unix_now();
+        if (!expiration.key_is_visible_unlocked(shard, key, now)) return null;
+    }
     return try stored.clone(allocator);
 }
 
@@ -78,6 +80,5 @@ pub fn get(state: *const runtime_state.DatabaseState, allocator: std.mem.Allocat
 
     shard.visibility_gate.lock_shared();
     defer shard.visibility_gate.unlock_shared();
-    const now = runtime_shard.unix_now();
-    return clone_plain_value_no_visibility(state, allocator, key, now);
+    return clone_plain_value_no_visibility(state, allocator, key);
 }

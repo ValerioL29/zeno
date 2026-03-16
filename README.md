@@ -27,7 +27,8 @@ Zeno is built for speed. Below are numbers from the latest benchmark run:
 | :--- | :--- | :--- |
 | **DB PUT (steady)** | **39.22M ops/sec** | **25 ns** |
 | **DB PUT Group16 (steady)** | **1.80M items/sec (0.11M ops/sec)** | **8.90 us** |
-| **DB GET (steady)** | **15.37M ops/sec** | **65 ns** |
+| **DB GET (steady)** | **29.71M ops/sec** | **33 ns** |
+| **DB GET (steady, TTL 10% keys)** | **16.40M ops/sec** | **60 ns** |
 | **ART Lookup (Hit)** | 102.76M ops/sec | 9 ns |
 | **ART Insert (Sequential)**| 80.10M ops/sec | 12 ns |
 | **WAL Append (Async)** | 0.69M ops/sec | 1.46 us |
