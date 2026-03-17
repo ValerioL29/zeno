@@ -195,6 +195,51 @@ pub fn upsert_value_unlocked_with_outcome(
     return upsert_value_unlocked_with_overwrite_ownership_and_outcome(shard, key, value, .tree_arena);
 }
 
+/// Attempts to overwrite an existing key's value without structural ART changes.
+/// Returns one overwrite outcome when the key exists.
+/// Returns null when the key does not exist and leaves the ART untouched.
+/// This path does not mutate ART structure (no splits, grows, shrinks, or child edits).
+pub fn try_overwrite_if_exists_unlocked(
+    shard: *runtime_shard.Shard,
+    key: []const u8,
+    value: *const types.Value,
+) !?UpsertOutcome {
+    const leaf = shard.tree.find_leaf_for_exact_key(key) orelse return null;
+
+    const previous_heavy_bytes = estimated_value_bytes(leaf.value);
+    const previous_heavy_event = previous_heavy_bytes != 0;
+
+    if (is_scalar_value(value)) {
+        if (leaf.value_owner == .heap_allocation) {
+            leaf.value.deinit(shard.base_allocator);
+        }
+        leaf.value.* = value.*;
+        return UpsertOutcome{
+            .overwritten = true,
+            .previous_heavy_bytes = previous_heavy_bytes,
+            .previous_heavy_event = previous_heavy_event,
+        };
+    }
+
+    const arena_allocator = shard.arena.allocator();
+    const cloned_value = try arena_allocator.create(types.Value);
+    cloned_value.* = try value.clone(arena_allocator);
+
+    const previous_value = leaf.value;
+    const previous_owner = leaf.value_owner;
+    leaf.store_value(cloned_value);
+    leaf.value_owner = .tree_allocator;
+    if (previous_owner == .heap_allocation) {
+        free_heap_value(shard.base_allocator, previous_value);
+    }
+
+    return UpsertOutcome{
+        .overwritten = true,
+        .previous_heavy_bytes = previous_heavy_bytes,
+        .previous_heavy_event = previous_heavy_event,
+    };
+}
+
 fn is_scalar_value(value: *const types.Value) bool {
     return switch (value.*) {
         .null_val, .boolean, .integer, .float => true,

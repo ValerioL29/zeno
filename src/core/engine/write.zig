@@ -36,6 +36,26 @@ pub fn put(state: *runtime_state.DatabaseState, key: []const u8, value: *const t
     shard.lock.lock();
     defer shard.lock.unlock();
 
+    // Fast path: key already exists - overwrite without seq bracket.
+    // No ART structural changes; leaf.store_value() provides release ordering.
+    if (try internal_mutate.try_overwrite_if_exists_unlocked(shard, key, value)) |outcome| {
+        try durability.append_put_if_enabled(state, key, value);
+        internal_ttl_index.clear_ttl_entry(shard, key);
+        state.record_operation(.put, 1);
+        state.record_operation(.overwrite, 1);
+        if (outcome.previous_heavy_bytes != 0 or outcome.previous_heavy_event) {
+            state.record_heavy_overwrite_retained_bytes(
+                shard_idx,
+                outcome.previous_heavy_bytes,
+                if (outcome.previous_heavy_event) 1 else 0,
+            );
+        }
+        return;
+    }
+
+    // Slow path: structural insert - seq bracket required.
+    // ART insert may modify tree structure (prefix splits, leaf splits, node grows),
+    // which concurrent GET readers could observe mid-traversal.
     const seq0 = shard.seq.load(.monotonic);
     shard.seq.store(seq0 + 1, .release);
     defer shard.seq.store(seq0 + 2, .release);
@@ -44,6 +64,8 @@ pub fn put(state: *runtime_state.DatabaseState, key: []const u8, value: *const t
     const outcome = try internal_mutate.upsert_value_unlocked_with_outcome(shard, key, value);
     internal_ttl_index.clear_ttl_entry(shard, key);
     state.record_operation(.put, 1);
+    // outcome.overwritten will be false here since find_leaf returned null above,
+    // but keep the check for defensiveness.
     if (outcome.overwritten) state.record_operation(.overwrite, 1);
     if (outcome.overwritten and (outcome.previous_heavy_bytes != 0 or outcome.previous_heavy_event)) {
         state.record_heavy_overwrite_retained_bytes(
@@ -89,15 +111,24 @@ pub fn put_group(state: *runtime_state.DatabaseState, writes: []const types.PutW
         shard.visibility_gate.lock_shared();
         shard.lock.lock();
 
-        // Note: put_group keeps its historical partial-mutation-on-error behavior for this shard.
-        // If an upsert fails mid-loop, earlier keys may already be committed and later keys may not.
-        // On that path, errdefer restores seq to even before releasing lock/visibility gate.
-        // GETs spinning on odd seq then proceed and can observe that same partial state,
-        // matching what readers observed after unlock under the old lockShared model.
-        const seq0 = shard.seq.load(.monotonic);
-        shard.seq.store(seq0 + 1, .release);
+        // Pre-scan: check if any write for this shard needs a structural insert.
+        // Structural insert = key does not yet exist in the ART.
+        var needs_bracket = false;
+        for (writes) |write_entry| {
+            if (runtime_shard.get_shard_index(write_entry.key) != shard_idx) continue;
+            if (shard.tree.find_leaf_for_exact_key(write_entry.key) == null) {
+                needs_bracket = true;
+                break;
+            }
+        }
+
+        var seq0: u64 = 0;
+        if (needs_bracket) {
+            seq0 = shard.seq.load(.monotonic);
+            shard.seq.store(seq0 + 1, .release);
+        }
         errdefer {
-            shard.seq.store(seq0 + 2, .release);
+            if (needs_bracket) shard.seq.store(seq0 + 2, .release);
             shard.lock.unlock();
             shard.visibility_gate.unlock_shared();
         }
@@ -122,7 +153,7 @@ pub fn put_group(state: *runtime_state.DatabaseState, writes: []const types.PutW
             state.record_heavy_overwrite_retained_bytes(shard_idx, retained_heavy_bytes, heavy_overwrite_events);
         }
 
-        shard.seq.store(seq0 + 2, .release);
+        if (needs_bracket) shard.seq.store(seq0 + 2, .release);
         shard.lock.unlock();
         shard.visibility_gate.unlock_shared();
     }
