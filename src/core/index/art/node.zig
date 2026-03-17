@@ -435,6 +435,13 @@ pub fn shrink(self: *Node, allocator: std.mem.Allocator) !void {
                         }
                     }
 
+                    // Safety: We rewrite child prefix metadata before publishing `child` at `self`.
+                    // Until the atomic store below, readers still reach this subtree via the old N4.
+                    // A stale reader that already captured `child` could race on these plain stores,
+                    // but the shard seqlock is odd for this entire mutation, so it must retry on
+                    // v1 != v2 and cannot return a result observed during this window.
+                    // Therefore plain stores for `prefix_len` and `prefix` are sufficient here;
+                    // per-byte atomic stores on the prefix array would add overhead with no gain.
                     child_header.prefix_len = @intCast(combined_len);
                     child_header.prefix = new_prefix;
 

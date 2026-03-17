@@ -89,6 +89,11 @@ pub fn put_group(state: *runtime_state.DatabaseState, writes: []const types.PutW
         shard.visibility_gate.lock_shared();
         shard.lock.lock();
 
+        // Note: put_group keeps its historical partial-mutation-on-error behavior for this shard.
+        // If an upsert fails mid-loop, earlier keys may already be committed and later keys may not.
+        // On that path, errdefer restores seq to even before releasing lock/visibility gate.
+        // GETs spinning on odd seq then proceed and can observe that same partial state,
+        // matching what readers observed after unlock under the old lockShared model.
         const seq0 = shard.seq.load(.monotonic);
         shard.seq.store(seq0 + 1, .release);
         errdefer {
