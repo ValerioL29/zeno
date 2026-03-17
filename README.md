@@ -12,7 +12,7 @@ Zeno began as a learning experiment into database storage internals and the Adap
 ## 🚀 Key Features
 
 *   **Adaptive Radix Tree (ART) Index**: O(k) lookups with SIMD-optimized node transitions (Node4 to Node256).
-*   **Sharded Concurrency**: Lock-sharding architecture to maximize multi-core throughput while minimizing contention.
+*   **Sharded Concurrency**: 256-shard architecture with lock-free GET via seqlock + tagged-pointer ART. Concurrent readers never block each other; writers serialize per shard.
 *   **Zero-Implicit Allocation**: Every function that allocates accepts an explicit `Allocator`, following strict Zig practices.
 *   **Durable Persistence**: 
     *   **WAL (Write-Ahead Log)**: Batched-async durability mode for high-throughput writes.
@@ -21,63 +21,92 @@ Zeno began as a learning experiment into database storage internals and the Adap
 
 ## 📊 Performance Benchmarks
 
-Zeno is built for speed. Below are numbers from the latest benchmark run:
+Zeno is built for speed. Numbers below are from the current benchmark suite running
+on Ubuntu 24.04.4, AMD Ryzen 7 5700X, 32GB DDR4 @ 3200MHz.
 
-| Operation | Throughput | Latency (Mean) |
-| :--- | :--- | :--- |
-| **DB PUT (steady)** | **37.07M ops/sec** | **26 ns** |
-| **DB PUT Group16 (steady)** | **1.64M items/sec (0.10M ops/sec)** | **9.77 us** |
-| **DB GET (steady)** | **32.16M ops/sec** | **31 ns** |
-| **DB GET (steady, TTL 10% keys)** | **16.60M ops/sec** | **60 ns** |
-| **ART Lookup (Hit)** | 99.90M ops/sec | 10 ns |
-| **ART Insert (Sequential)**| 82.97M ops/sec | 12 ns |
-| **WAL Append (Async)** | 0.69M ops/sec | 1.46 us |
-| **WAL Append Grouped16 (Async)** | 0.84M items/sec (0.05M ops/sec) | 19.10 us |
+**Benchmark methodology:** steady-state benchmarks use 1,000 rotating keys, 2,000
+warmup iterations, and 100,000 measured iterations. Latency columns show p50/p99.
+Scaling benchmarks run 1,000,000 ops per configuration.
 
-Sharded scalability (latest run):
+### Point operation throughput
 
-| Workload | 1 thread | 2 threads | 4 threads | 8 threads | 16 threads |
+| Operation | Throughput | p50 | p99 |
+| :--- | :--- | :--- | :--- |
+| **DB PUT (overwrite, steady)** | **14.75M ops/sec** | **70 ns** | **90 ns** |
+| **DB GET (steady)** | **10.71M ops/sec** | **90 ns** | **110 ns** |
+| **DB GET (steady, TTL mixed)** | **17.47M ops/sec** | **50 ns** | **100 ns** |
+| **DB PUT Group16 (steady)** | **1.18M items/sec** | **12.98 µs** | **19.83 µs** |
+| ART Lookup | 20.98M ops/sec | 50 ns | 60 ns |
+| ART Insert | 30.27M ops/sec | 30 ns | 40 ns |
+| WAL Append (async) | 0.66M ops/sec | 1.38 µs | 3.71 µs |
+
+### Sharded scalability
+
+GET is lock-free via seqlock — multiple readers on the same shard proceed in parallel
+with no serialization between them. PUT serializes writers via shard mutex; inserts
+that modify ART structure additionally bracket with the seqlock sequence counter.
+
+**GET — no contention (each thread on a distinct shard):**
+
+| Threads | 1 | 2 | 4 | 8 | 16 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **GET (Shared)** | 28.34M | 51.47M | 103.97M | 182.91M | 256.93M ops/sec |
-| **PUT (Sharded)** | 38.79M | 72.54M | 128.74M | 247.99M | 262.48M ops/sec |
+| Throughput | 35.58M | 67.24M | 119.28M | 169.73M | 203.11M ops/sec |
+| Scaling | 1.00x | 1.89x | 3.35x | 4.77x | 5.71x |
 
-*Benchmarks conducted on Ubuntu 24.04.4, AMD Ryzen 7 5700X, 32GB DDR4 @ 3200MHz*
+**GET — hotspot (all threads on the same key):**
 
-Want to reproduce these numbers on your machine? From the repository root, run:
+| Threads | 1 | 2 | 4 | 8 | 16 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Throughput | 34.05M | 65.10M | 121.84M | 226.88M | 281.13M ops/sec |
+| Scaling | 1.00x | 1.91x | 3.58x | 6.66x | 8.26x |
+
+*GET hotspot scales super-linearly because multiple readers traverse the same cached
+ART path simultaneously without contention.*
+
+**GET — uniform 10k keys (realistic workload):**
+
+| Threads | 1 | 2 | 4 | 8 | 16 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Throughput | 10.83M | 18.99M | 34.10M | 56.15M | 89.70M ops/sec |
+| Scaling | 1.00x | 1.75x | 3.15x | 5.19x | 8.29x |
+
+**PUT — no contention (each thread on a distinct shard):**
+
+| Threads | 1 | 2 | 4 | 8 | 16 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Throughput | 41.76M | 68.33M | 122.99M | 248.82M | 203.71M ops/sec |
+| Scaling | 1.00x | 1.64x | 2.95x | 5.96x | 4.88x |
+
+**PUT — uniform 10k keys (realistic workload):**
+
+| Threads | 1 | 2 | 4 | 8 | 16 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Throughput | 12.02M | 16.04M | 27.25M | 43.20M | 55.18M ops/sec |
+| Scaling | 1.00x | 1.33x | 2.27x | 3.59x | 4.59x |
+
+### Heavy overwrite calibration
+
+For workloads with frequent overwrites of large values (strings, arrays), Zeno
+accumulates retained arena bytes until `compact_shard` is called. The table below
+shows the trade-off between compaction frequency, p99 latency, and retained memory
+(`payload=1KB`, `keys=64`, `ops=50k`):
+
+| compact_every_N | p50 | p99 | max | retained_final | elapsed_total |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 1000 | 110 ns | 6.14 µs | 138.54 µs | 0 B | 106.27 ms |
+| 5000 | 100 ns | 4.38 µs | 175.05 µs | 0 B | 48.33 ms |
+| 10000 | 100 ns | 3.76 µs | 63.37 µs | 0 B | 39.42 ms |
+| off | 90 ns | 3.69 µs | 123.54 µs | 48.83 MB | 25.10 ms |
+
+- Use `5000` when you need bounded retained bytes with moderate maintenance overhead.
+- Use `off` only when peak throughput is the priority and high retained bytes are
+    acceptable.
+
+To reproduce all numbers on your machine:
 
 ```bash
 zig build bench -Doptimize=ReleaseFast
 ```
-
-This executes the full benchmark suite (steady-state, throughput summary, and sharded scalability) and prints results directly to your terminal.
-
-### Heavy Overwrite Metrics (Essential)
-
-Latest `ReleaseFast` run:
-
-| Metric | Result |
-| :--- | :--- |
-| `put overwrite64 steady` | `20.32M ops/sec` |
-| `put overwrite64 heavy1k steady` | `1.82M ops/sec` |
-| `put overwrite64 heavy1k manual` | `1.71M ops/sec` |
-
-Heavy calibration command:
-
-```bash
-zig build bench -Doptimize=ReleaseFast -- --heavy-overwrite-profile
-```
-
-Most useful calibration points (`payload=1KB`, `keys=64`, `ops=50k`):
-
-| compact_every | p99 | retained_final | elapsed_total |
-| :--- | :--- | :--- | :--- |
-| `1000` | `6.10us` | `0B` | `90.21ms` |
-| `5000` | `3.88us` | `0B` | `45.25ms` |
-| `off` | `3.73us` | `48.83MB` | `26.43ms` |
-
-Operational note:
-- Start with `5000` when you need bounded retained bytes with moderate maintenance overhead.
-- Use `off` only when peak throughput is the priority and high retained bytes are acceptable.
 
 ## 🛠 Usage
 
@@ -125,8 +154,8 @@ if (try db.get("user:123")) |val| {
 
 Zeno uses a shard-first architecture designed to keep hot paths predictable under concurrency:
 
-- The keyspace is partitioned into independent shards (hash-routed by key), and each shard owns its own ART index, lock, and memory arena.
-- Point operations (`put`, `get`, `delete`) are shard-local after routing, minimizing cross-core contention and avoiding a single global lock bottleneck.
+- The keyspace is partitioned into 256 independent shards (hash-routed by key), and each shard owns its own ART index, lock, sequence counter, and memory arena.
+- Point operations are shard-local after routing. `get` is lock-free via a seqlock — concurrent readers on the same shard proceed without serializing against each other. `put` acquires the shard-exclusive lock; overwrites of existing keys skip the seqlock sequence bracket for minimum latency.
 - Read consistency is coordinated with visibility gates and `ReadView`, so scans and in-view reads can observe stable state while writes continue on other shards.
 - Durability is handled by WAL + snapshot: WAL records live mutations for crash recovery, while snapshots provide faster restart and periodic state compaction.
 
