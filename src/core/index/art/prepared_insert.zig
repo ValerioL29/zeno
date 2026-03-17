@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Value = @import("../../types/value.zig").Value;
+const Tree = @import("tree.zig").Tree;
 const node = @import("node.zig");
 const Node = node.Node;
 const NodeHeader = node.NodeHeader;
@@ -672,51 +673,30 @@ fn materialize_live_internal(allocator: std.mem.Allocator, current: *ShadowNode,
         header.node_type,
         header.prefix_len,
         header.prefix,
-        find_any_leaf(live).key,
+        Tree.find_any_leaf(live).key,
         if (header.leaf_value) |leaf_value| leaf_value.key else null,
         recommended_shadow_child_capacity(header.node_type, header.num_children),
     );
-    switch (header.node_type) {
-        .node4 => {
-            const n4 = @as(*const Node4, @alignCast(@fieldParentPtr("header", header)));
-            for (0..n4.header.num_children) |i| {
-                try insert_shadow_child(allocator, internal, .{
-                    .key_byte = n4.keys[i],
-                    .node = try create_live_shadow_node(allocator, &n4.children[i]),
-                });
-            }
-        },
-        .node16 => {
-            const n16 = @as(*const Node16, @alignCast(@fieldParentPtr("header", header)));
-            for (0..n16.header.num_children) |i| {
-                try insert_shadow_child(allocator, internal, .{
-                    .key_byte = n16.keys[i],
-                    .node = try create_live_shadow_node(allocator, &n16.children[i]),
-                });
-            }
-        },
-        .node48 => {
-            const n48 = @as(*const Node48, @alignCast(@fieldParentPtr("header", header)));
-            for (0..256) |i| {
-                const idx = n48.child_index[i];
-                if (idx == Node48.EMPTY_INDEX) continue;
-                try insert_shadow_child(allocator, internal, .{
-                    .key_byte = @intCast(i),
-                    .node = try create_live_shadow_node(allocator, &n48.children[idx]),
-                });
-            }
-        },
-        .node256 => {
-            const n256 = @as(*const Node256, @alignCast(@fieldParentPtr("header", header)));
-            for (0..256) |i| {
-                if (n256.children[i].is_empty()) continue;
-                try insert_shadow_child(allocator, internal, .{
-                    .key_byte = @intCast(i),
-                    .node = try create_live_shadow_node(allocator, &n256.children[i]),
-                });
-            }
-        },
-    }
+    const ChildCopyCtx = struct {
+        allocator: std.mem.Allocator,
+        internal: *ShadowInternal,
+
+        fn visit(ctx: @This(), key_byte: u8, child: *const Node) anyerror!bool {
+            try insert_shadow_child(ctx.allocator, ctx.internal, .{
+                .key_byte = key_byte,
+                .node = try create_live_shadow_node(ctx.allocator, child),
+            });
+            return true;
+        }
+    };
+    header.for_each_child(ChildCopyCtx, .{
+        .allocator = allocator,
+        .internal = internal,
+    }, ChildCopyCtx.visit) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable,
+    };
+
     current.* = .{ .internal = internal };
     return internal;
 }
@@ -824,7 +804,7 @@ fn navigate_to_target(root: *Node, prepared: *const PreparedInsert) !struct { no
         };
         try validate_internal_preconditions(current, header, step.expected_node_type, step.expected_num_children, step.expected_prefix_len, step.expected_prefix, step.expected_exemplar_key, step.expected_leaf_value_present, depth);
         if (depth + step.expected_prefix_len >= prepared.key.len) return error.BatchPlanInvariantViolation;
-        const child = find_child(header, step.child_byte) orelse return error.BatchPlanInvariantViolation;
+        const child = header.find_child(step.child_byte) orelse return error.BatchPlanInvariantViolation;
         depth += step.expected_prefix_len + 1;
         current = child;
     }
@@ -881,73 +861,13 @@ fn validate_internal_preconditions(
         return error.BatchPlanInvariantViolation;
     }
     if (expected_prefix_len > MAX_PREFIX_LEN) {
-        const exemplar = find_any_leaf(node_ref).key;
+        const exemplar = Tree.find_any_leaf(node_ref).key;
         const hidden_start = depth + MAX_PREFIX_LEN;
         const hidden_end = depth + expected_prefix_len;
         if (!std.mem.eql(u8, exemplar[hidden_start..hidden_end], expected_exemplar_key[hidden_start..hidden_end])) {
             return error.BatchPlanInvariantViolation;
         }
     }
-}
-
-/// Finds one exemplar leaf beneath `n` for hidden-prefix validation.
-///
-/// Time Complexity: O(h), where `h` is the traversed node height until one leaf is reached.
-///
-/// Allocator: Does not allocate.
-fn find_any_leaf(n: *const Node) *const Leaf {
-    var current = n;
-    while (true) {
-        switch (current.*) {
-            .leaf => |leaf| return leaf,
-            .internal => |header| {
-                if (header.leaf_value) |leaf| return leaf;
-                current = switch (header.node_type) {
-                    .node4 => blk: {
-                        const n4 = @as(*const Node4, @alignCast(@fieldParentPtr("header", header)));
-                        break :blk &n4.children[0];
-                    },
-                    .node16 => blk: {
-                        const n16 = @as(*const Node16, @alignCast(@fieldParentPtr("header", header)));
-                        break :blk &n16.children[0];
-                    },
-                    .node48 => blk: {
-                        const n48 = @as(*const Node48, @alignCast(@fieldParentPtr("header", header)));
-                        for (0..256) |i| {
-                            if (n48.child_index[i] != Node48.EMPTY_INDEX) {
-                                break :blk &n48.children[n48.child_index[i]];
-                            }
-                        }
-                        unreachable;
-                    },
-                    .node256 => blk: {
-                        const n256 = @as(*const Node256, @alignCast(@fieldParentPtr("header", header)));
-                        for (0..256) |i| {
-                            if (!n256.children[i].is_empty()) {
-                                break :blk &n256.children[i];
-                            }
-                        }
-                        unreachable;
-                    },
-                };
-            },
-            .empty => unreachable,
-        }
-    }
-}
-
-/// Finds one live child edge under `header` by transition byte.
-///
-/// Time Complexity: O(1) for the selected node class.
-///
-/// Allocator: Does not allocate.
-fn find_child(header: *const NodeHeader, key_byte: u8) ?*Node {
-    return switch (header.node_type) {
-        .node4 => @as(*const Node4, @alignCast(@fieldParentPtr("header", header))).find_child(key_byte),
-        .node16 => @as(*const Node16, @alignCast(@fieldParentPtr("header", header))).find_child(key_byte),
-        .node48 => @as(*const Node48, @alignCast(@fieldParentPtr("header", header))).find_child(key_byte),
-        .node256 => @as(*const Node256, @alignCast(@fieldParentPtr("header", header))).find_child(key_byte),
-    };
 }
 
 /// Allocates one reserved internal node matching `node_type`.
@@ -1057,7 +977,7 @@ fn lookup_value_for_test(root: *const Node, key: []const u8) ?*Value {
                         depth += 1;
                     }
                     if (header.prefix_len > MAX_PREFIX_LEN) {
-                        const exemplar = find_any_leaf(current_node_ptr).key;
+                        const exemplar = Tree.find_any_leaf(current_node_ptr).key;
                         const limit = @min(exemplar.len, key.len);
                         for (MAX_PREFIX_LEN..header.prefix_len) |_| {
                             if (depth >= limit or exemplar[depth] != key[depth]) return null;
@@ -1070,7 +990,7 @@ fn lookup_value_for_test(root: *const Node, key: []const u8) ?*Value {
                     return if (header.leaf_value) |leaf| leaf.value else null;
                 }
 
-                const child = find_child(header, key[depth]) orelse return null;
+                const child = header.find_child(key[depth]) orelse return null;
                 current_node_ptr = child;
                 depth += 1;
             },

@@ -57,7 +57,7 @@ pub const Tree = struct {
     /// Finds any leaf node in the tree.
     /// Time Complexity: O(k) where k is the length of the string key.
     /// Allocator: Does not allocate.
-    fn find_any_leaf(n: *const Node) *const Leaf {
+    pub fn find_any_leaf(n: *const Node) *const Leaf {
         var cur = n;
         while (true) {
             switch (cur.*) {
