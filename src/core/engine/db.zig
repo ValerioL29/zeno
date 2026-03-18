@@ -236,7 +236,9 @@ pub const Database = struct {
     ///
     /// Thread Safety: Safe for concurrent use with other point operations; acquires the global visibility gate exclusively before taking one shard-exclusive lock and appends the live DELETE record inside that same visibility window.
     pub fn delete(self: *Database, key: []const u8) EngineError!bool {
-        return metrics.call_with_latency(&self.state, write.delete, .{ &self.state, key });
+        const result = try metrics.call_with_latency(&self.state, write.delete, .{ &self.state, key });
+        self.maybe_run_wal_checkpoint();
+        return result;
     }
 
     /// Sets or clears key expiration at an absolute unix-second timestamp.
@@ -247,7 +249,9 @@ pub const Database = struct {
     ///
     /// Thread Safety: Safe for concurrent use with reads and scans; acquires the global visibility gate exclusively before taking one shard-exclusive lock.
     pub fn expire_at(self: *Database, key: []const u8, unix_seconds: ?i64) EngineError!bool {
-        return metrics.call_with_latency(&self.state, expire_at_boundary, .{ self, key, unix_seconds });
+        const result = try metrics.call_with_latency(&self.state, expire_at_boundary, .{ self, key, unix_seconds });
+        self.maybe_run_wal_checkpoint();
+        return result;
     }
 
     /// Returns Redis-style TTL for one plain key.
