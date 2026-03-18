@@ -54,6 +54,48 @@ fn clone_plain_value_no_visibility(
     }
 }
 
+/// Checks whether `key` is present and TTL-visible without allocating.
+///
+/// Time Complexity: O(k), where `k` is ART lookup work.
+///
+/// Allocator: Does not allocate.
+///
+/// Thread Safety: Requires a surrounding visibility window and acquires the selected
+/// shard's shared lock while reading.
+fn check_key_exists_no_visibility(
+    state: *const runtime_state.DatabaseState,
+    shard: *runtime_shard.Shard,
+    key: []const u8,
+) bool {
+    _ = state;
+
+    while (true) {
+        const v1 = shard.seq.load(.acquire);
+        if ((v1 & 1) != 0) {
+            std.atomic.spinLoopHint();
+            continue;
+        }
+
+        const stored = shard.tree.lookup(key);
+
+        const v2 = shard.seq.load(.acquire);
+        if (v1 != v2) {
+            std.atomic.spinLoopHint();
+            continue;
+        }
+
+        if (stored == null) return false;
+
+        if (shard.has_ttl_entries) {
+            const stored_expire_at = internal_ttl_index.get_expire_at(shard, key) orelse return true;
+            const now = runtime_shard.unix_now();
+            if (expiration.is_expired(stored_expire_at, now)) return false;
+        }
+
+        return true;
+    }
+}
+
 /// Opens one consistent read window over the current visible engine state.
 ///
 /// Time Complexity: O(s), where `s` is the shard count.
@@ -94,4 +136,25 @@ pub fn get(state: *const runtime_state.DatabaseState, allocator: std.mem.Allocat
     const shard = @constCast(&state.shards[shard_idx]);
 
     return clone_plain_value_no_visibility(state, shard, allocator, key);
+}
+
+/// Returns whether `key` is present and TTL-visible in the engine.
+///
+/// Time Complexity: O(n + k), where `n` is `key.len` for shard routing and `k` is ART lookup work.
+///
+/// Allocator: Does not allocate.
+///
+/// Thread Safety: Lock-free via the shard seqlock; safe for concurrent use with
+/// point writes and scans.
+pub fn exists(state: *const runtime_state.DatabaseState, key: []const u8) error_mod.EngineError!bool {
+    internal_mutate.validate_key(key) catch |err| switch (err) {
+        error.EmptyKey, error.KeyTooLarge => return error.KeyTooLarge,
+    };
+
+    const shard_idx = runtime_shard.get_shard_index(key);
+    const shard = @constCast(&state.shards[shard_idx]);
+
+    const found = check_key_exists_no_visibility(state, shard, key);
+    state.record_operation(.get, 1);
+    return found;
 }

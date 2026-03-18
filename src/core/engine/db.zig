@@ -153,6 +153,20 @@ pub const Database = struct {
         return metrics.call_with_latency(&self.state, read.get, .{ &self.state, allocator, key });
     }
 
+    /// Returns whether `key` is present and TTL-visible in the engine.
+    ///
+    /// Time Complexity: O(n + k), where `n` is `key.len` for shard routing and `k` is ART lookup work.
+    ///
+    /// Allocator: Does not allocate.
+    ///
+    /// Ownership: Does not allocate or return owned data.
+    ///
+    /// Thread Safety: Lock-free via the shard seqlock; safe for concurrent use with
+    /// point writes and scans.
+    pub fn exists(self: *const Database, key: []const u8) EngineError!bool {
+        return metrics.call_with_latency(&self.state, read.exists, .{ &self.state, key });
+    }
+
     /// Writes one plain key/value pair through the engine contract surface.
     ///
     /// Time Complexity: O(n + k + v), where `n` is `key.len` for shard routing, `k` is ART lookup or insert work, and `v` is cloned value size.
@@ -3222,4 +3236,87 @@ test "close stops the sweep thread cleanly" {
     });
     // Verify close does not hang or deadlock with a running sweep thread
     try db.close();
+}
+
+test "exists returns true for a present key" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const value = types.Value{ .integer = 1 };
+    try db.put("exists:alpha", &value);
+
+    try testing.expect(try db.exists("exists:alpha"));
+}
+
+test "exists returns false for a missing key" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    try testing.expect(!try db.exists("exists:missing"));
+}
+
+test "exists returns false for an expired key" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const value = types.Value{ .integer = 1 };
+    try db.put("exists:expired", &value);
+    try set_ttl_for_test(db, "exists:expired", runtime_shard.unix_now() - 1);
+
+    try testing.expect(!try db.exists("exists:expired"));
+}
+
+test "exists returns true for a key with a future ttl" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const value = types.Value{ .integer = 1 };
+    try db.put("exists:live", &value);
+    try set_ttl_for_test(db, "exists:live", runtime_shard.unix_now() + 60);
+
+    try testing.expect(try db.exists("exists:live"));
+}
+
+test "exists returns false after delete" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const value = types.Value{ .integer = 1 };
+    try db.put("exists:deleted", &value);
+    try testing.expect(try db.exists("exists:deleted"));
+
+    _ = try db.delete("exists:deleted");
+    try testing.expect(!try db.exists("exists:deleted"));
+}
+
+test "exists rejects empty and oversized keys" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    try testing.expectError(error.KeyTooLarge, db.exists(""));
+}
+
+test "engine boundary latency sampling counts exists calls" {
+    const testing = std.testing;
+
+    const db = try open(testing.allocator, .{
+        .metrics = .{ .mode = .full },
+    });
+    defer db.close() catch unreachable;
+
+    const before = latency_samples_for_test(db);
+    _ = try db.exists("latency:exists");
+    try testing.expectEqual(before + 1, latency_samples_for_test(db));
 }
