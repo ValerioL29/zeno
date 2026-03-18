@@ -28,6 +28,7 @@ pub const Database = struct {
     allocator: std.mem.Allocator,
     state: runtime_state.DatabaseState,
     auto_compaction: AutoCompaction = .{},
+    auto_wal_checkpoint: AutoWalCheckpoint = .{},
 
     /// Per-database policy state for optional heavy-overwrite auto-compaction.
     const AutoCompaction = struct {
@@ -36,6 +37,15 @@ pub const Database = struct {
         /// Monotonic heavy-overwrite tick used for cadence modulo checks.
         tick: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
         /// Re-entry guard so automatic maintenance never runs concurrently.
+        in_progress: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    };
+
+    /// Per-database policy state for optional WAL size-triggered auto-checkpoint.
+    const AutoWalCheckpoint = struct {
+        /// Fires one checkpoint cycle when WAL bytes since last compact exceed this.
+        /// `null` disables auto mode. Only effective when `snapshot_path` is configured.
+        max_bytes: ?u64 = null,
+        /// Re-entry guard so automatic WAL checkpoints never run concurrently.
         in_progress: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     };
 
@@ -145,6 +155,7 @@ pub const Database = struct {
         const heavy_events_before = self.state.counters.overwritten_heavy_events_total.load(.monotonic);
         try metrics.call_with_latency(&self.state, write.put, .{ &self.state, key, value });
         self.maybe_run_heavy_overwrite_compaction(heavy_events_before);
+        self.maybe_run_wal_checkpoint();
     }
 
     /// Writes multiple plain key/value pairs as independent standalone mutations.
@@ -162,6 +173,7 @@ pub const Database = struct {
         const heavy_events_before = self.state.counters.overwritten_heavy_events_total.load(.monotonic);
         try metrics.call_with_latency(&self.state, write.put_group, .{ &self.state, writes });
         self.maybe_run_heavy_overwrite_compaction(heavy_events_before);
+        self.maybe_run_wal_checkpoint();
     }
 
     fn maybe_run_heavy_overwrite_compaction(self: *Database, heavy_events_before: u64) void {
@@ -188,6 +200,32 @@ pub const Database = struct {
 
     fn end_heavy_overwrite_compaction(self: *Database) void {
         self.auto_compaction.in_progress.store(false, .release);
+    }
+
+    /// Runs one automatic checkpoint when the configured WAL byte threshold is crossed.
+    fn maybe_run_wal_checkpoint(self: *Database) void {
+        const max_bytes = self.auto_wal_checkpoint.max_bytes orelse return;
+        const wal = self.state.wal orelse return;
+        if (self.state.snapshot_path == null) return;
+        if (wal.wal_bytes_pending() < max_bytes) return;
+        if (!self.begin_wal_checkpoint()) return;
+        defer self.end_wal_checkpoint();
+        lifecycle.checkpoint(self) catch {};
+    }
+
+    /// Attempts to acquire the auto-checkpoint re-entry guard.
+    fn begin_wal_checkpoint(self: *Database) bool {
+        return self.auto_wal_checkpoint.in_progress.cmpxchgStrong(
+            false,
+            true,
+            .acq_rel,
+            .monotonic,
+        ) == null;
+    }
+
+    /// Releases the auto-checkpoint re-entry guard.
+    fn end_wal_checkpoint(self: *Database) void {
+        self.auto_wal_checkpoint.in_progress.store(false, .release);
     }
 
     /// Deletes one plain key from the engine contract surface.
@@ -267,7 +305,8 @@ pub const Database = struct {
     ///
     /// Thread Safety: Safe for concurrent use with point operations and read views; acquires the global visibility gate exclusively for the full apply window.
     pub fn apply_batch(self: *Database, writes: []const types.PutWrite) EngineError!void {
-        return metrics.call_with_latency(&self.state, batch_ops.apply_batch, .{ &self.state, self.allocator, writes });
+        try metrics.call_with_latency(&self.state, batch_ops.apply_batch, .{ &self.state, self.allocator, writes });
+        self.maybe_run_wal_checkpoint();
     }
 
     /// Opens one consistent read view.
@@ -2927,4 +2966,88 @@ test "checkpointed restart keeps wal next_lsn monotonic for later writes" {
     defer beta.deinit(testing.allocator);
     try testing.expectEqual(@as(i64, 1), alpha.integer);
     try testing.expectEqual(@as(i64, 2), beta.integer);
+}
+
+test "max_wal_bytes triggers automatic checkpoint when threshold is exceeded" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "auto-wal-checkpoint.snapshot");
+    defer testing.allocator.free(snapshot_path);
+    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "auto-wal-checkpoint.wal");
+    defer testing.allocator.free(wal_path);
+
+    // Threshold pequeno para que o primeiro put ja dispare o checkpoint.
+    const db = try open(testing.allocator, .{
+        .snapshot_path = snapshot_path,
+        .wal_path = wal_path,
+        .fsync_mode = .none,
+        .max_wal_bytes = 1,
+    });
+    defer db.close() catch unreachable;
+
+    const value = types.Value{ .integer = 42 };
+    try db.put("alpha", &value);
+
+    // Apos o put, o auto-checkpoint deve ter rodado pelo menos uma vez.
+    const stats = db.state.stats_snapshot();
+    try testing.expect(stats.checkpoint_count_total >= 1);
+
+    // O WAL deve ter sido compactado; bytes_pending cai abaixo do threshold original.
+    if (db.state.wal) |wal| {
+        // Apos checkpoint, o WAL e truncado. Pode ser 0 ou muito pequeno.
+        try testing.expect(wal.wal_bytes_pending() < 1024 * 1024);
+    }
+}
+
+test "max_wal_bytes without snapshot_path does not trigger checkpoint" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "auto-wal-no-snap.wal");
+    defer testing.allocator.free(wal_path);
+
+    // max_wal_bytes configurado, mas snapshot_path ausente; auto-checkpoint nao deve armar.
+    const db = try open(testing.allocator, .{
+        .wal_path = wal_path,
+        .fsync_mode = .none,
+        .max_wal_bytes = 1,
+    });
+    defer db.close() catch unreachable;
+
+    const value = types.Value{ .integer = 1 };
+    try db.put("alpha", &value);
+
+    const stats = db.state.stats_snapshot();
+    try testing.expectEqual(@as(u64, 0), stats.checkpoint_count_total);
+}
+
+test "max_wal_bytes null leaves checkpoint scheduling fully manual" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "auto-wal-null.snapshot");
+    defer testing.allocator.free(snapshot_path);
+    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "auto-wal-null.wal");
+    defer testing.allocator.free(wal_path);
+
+    const db = try open(testing.allocator, .{
+        .snapshot_path = snapshot_path,
+        .wal_path = wal_path,
+        .fsync_mode = .none,
+        .max_wal_bytes = null,
+    });
+    defer db.close() catch unreachable;
+
+    const value = types.Value{ .integer = 1 };
+    for (0..100) |_| try db.put("alpha", &value);
+
+    const stats = db.state.stats_snapshot();
+    try testing.expectEqual(@as(u64, 0), stats.checkpoint_count_total);
 }

@@ -37,6 +37,16 @@ pub const DatabaseOptions = struct {
     fsync_interval_ms: u32 = 2,
     metrics: MetricsConfig = default_metrics_config(),
     heavy_overwrite_compact_every: ?u32 = null,
+    /// Triggers an automatic checkpoint when the WAL grows beyond this many bytes since
+    /// the last `truncate_up_to_lsn`. `null` keeps checkpoint scheduling fully manual.
+    ///
+    /// Requires `snapshot_path` to be configured; if `snapshot_path` is absent, the
+    /// threshold is never armed and WAL growth remains unbounded regardless of this value.
+    ///
+    /// Operational guidance: a value around 64 MiB (67_108_864) works well for most
+    /// workloads. Lower values cause more frequent checkpoints; values below ~1 MiB may
+    /// impose noticeable checkpoint overhead on write-heavy workloads.
+    max_wal_bytes: ?u64 = null,
 
     // Maintenance note:
     // Heavy-overwrite reclaim is currently caller-managed through explicit

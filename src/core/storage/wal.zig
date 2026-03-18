@@ -97,6 +97,7 @@ const FlushState = struct {
     fsync_interval_ms: u32,
     flush_thread: ?std.Thread,
     bytes_written_total: std.atomic.Value(u64),
+    bytes_since_compact: std.atomic.Value(u64),
 };
 
 /// One materialized WAL record slice inside a scratch append buffer.
@@ -163,6 +164,7 @@ pub const Wal = struct {
             .fsync_interval_ms = options.fsync_interval_ms,
             .flush_thread = null,
             .bytes_written_total = std.atomic.Value(u64).init(0),
+            .bytes_since_compact = std.atomic.Value(u64).init(0),
         };
 
         var wal = Wal{
@@ -262,6 +264,7 @@ pub const Wal = struct {
         const last_lsn = self.next_lsn - 1;
         try write_all_tracked(self.state.file, envelope.items);
         _ = self.state.bytes_written_total.fetchAdd(envelope.items.len, .monotonic);
+        _ = self.state.bytes_since_compact.fetchAdd(envelope.items.len, .monotonic);
         self.state.last_appended_lsn.store(last_lsn, .release);
         self.state.dirty.store(true, .release);
         try self.maybe_fsync_inline(last_lsn);
@@ -386,6 +389,7 @@ pub const Wal = struct {
         const commit_lsn = begin_lsn + @as(u64, @intCast(writes.len)) + 1;
         try write_all_tracked(self.state.file, envelope.items);
         _ = self.state.bytes_written_total.fetchAdd(envelope.items.len, .monotonic);
+        _ = self.state.bytes_since_compact.fetchAdd(envelope.items.len, .monotonic);
         self.state.last_appended_lsn.store(commit_lsn, .release);
         self.state.dirty.store(true, .release);
         try self.maybe_fsync_inline(commit_lsn);
@@ -438,6 +442,7 @@ pub const Wal = struct {
             try self.state.file.seekTo(0);
             store_max_lsn(&self.state.last_fsync_lsn, newest_lsn);
             self.state.dirty.store(false, .release);
+            self.state.bytes_since_compact.store(0, .monotonic);
             return;
         }
 
@@ -461,6 +466,7 @@ pub const Wal = struct {
         old_file.close();
         self.state.file = tmp_file;
         promoted_tmp_file = true;
+        self.state.bytes_since_compact.store(0, .monotonic);
         store_max_lsn(&self.state.last_fsync_lsn, newest_lsn);
         self.state.dirty.store(false, .release);
     }
@@ -478,6 +484,19 @@ pub const Wal = struct {
         const last_appended = self.state.last_appended_lsn.load(.acquire);
         const last_fsync = self.state.last_fsync_lsn.load(.acquire);
         return dirty or last_fsync < last_appended;
+    }
+
+    /// Returns the estimated number of WAL bytes appended since the last successful
+    /// `truncate_up_to_lsn` call.
+    ///
+    /// Time Complexity: O(1).
+    ///
+    /// Allocator: Does not allocate.
+    ///
+    /// Thread Safety: Reads a single atomic counter; may transiently lag a concurrent
+    /// reset from a parallel `truncate_up_to_lsn` call.
+    pub fn wal_bytes_pending(self: *const Wal) u64 {
+        return self.state.bytes_since_compact.load(.monotonic);
     }
 
     /// Closes the WAL handle and releases storage-owned resources.
@@ -558,6 +577,7 @@ pub const Wal = struct {
 
             try write_all_tracked(self.state.file, encoded);
             _ = self.state.bytes_written_total.fetchAdd(encoded.len, .monotonic);
+            _ = self.state.bytes_since_compact.fetchAdd(encoded.len, .monotonic);
             self.state.last_appended_lsn.store(lsn, .release);
             self.state.dirty.store(true, .release);
             try self.maybe_fsync_inline(lsn);
@@ -577,6 +597,7 @@ pub const Wal = struct {
 
         try write_all_tracked(self.state.file, buf.items);
         _ = self.state.bytes_written_total.fetchAdd(buf.items.len, .monotonic);
+        _ = self.state.bytes_since_compact.fetchAdd(buf.items.len, .monotonic);
         self.state.last_appended_lsn.store(lsn, .release);
         self.state.dirty.store(true, .release);
         try self.maybe_fsync_inline(lsn);

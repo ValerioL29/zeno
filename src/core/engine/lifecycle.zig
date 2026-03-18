@@ -58,6 +58,7 @@ pub fn open(allocator: Allocator, options: DatabaseOptions) EngineError!*Databas
         if (n == 0) null else n
     else
         null;
+    db.auto_wal_checkpoint.max_bytes = options.max_wal_bytes;
 
     const snapshot_lsn = try load_snapshot_for_open(db, allocator, options.snapshot_path, options.wal_path);
 
