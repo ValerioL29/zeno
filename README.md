@@ -137,17 +137,42 @@ exe.root_module.addImport("zeno", zeno.module("zeno"));
 ### Quick Example
 
 ```zig
+const std = @import("std");
 const zeno = @import("zeno");
-var db = try zeno.Database.open(allocator, .{
-    .path = "./data",
-    .wal_mode = .batched_async,
-});
-defer db.close();
 
-try db.put("user:123", .{ .string = "Enzo" });
-if (try db.get("user:123")) |val| {
-    std.debug.print("Found: {s}\n", .{val.string});
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // In-memory engine (no persistence)
+    const db = try zeno.public.create(allocator);
+    defer db.close() catch {};
+
+    // Write a value
+    const value = zeno.types.Value{ .string = "Alice" };
+    try db.put("user:1", &value);
+
+    // Read it back, caller owns the returned value
+    if (try db.get(allocator, "user:1")) |val| {
+        defer val.deinit(allocator);
+        std.debug.print("Found: {s}\n", .{val.string});
+    }
+
+    // Delete
+    _ = try db.delete("user:1");
 }
+```
+
+For a persistent engine with WAL and snapshot recovery:
+
+```zig
+const db = try zeno.public.open(allocator, .{
+    .wal_path      = "./data.wal",
+    .snapshot_path = "./data.snapshot",
+    .fsync_mode    = .batched_async,
+});
+defer db.close() catch {};
 ```
 
 ## 🏗 Architecture
