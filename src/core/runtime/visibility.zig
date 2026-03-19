@@ -15,7 +15,7 @@ pub const VisibilityGate = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Thread-safe; acquires the shared side of the runtime visibility gate.
-    pub fn lock_shared(self: *VisibilityGate) void {
+    pub fn lockShared(self: *VisibilityGate) void {
         self.lock.lockShared();
     }
 
@@ -26,7 +26,7 @@ pub const VisibilityGate = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Thread-safe; releases the shared side of the runtime visibility gate.
-    pub fn unlock_shared(self: *VisibilityGate) void {
+    pub fn unlockShared(self: *VisibilityGate) void {
         self.lock.unlockShared();
     }
 
@@ -37,7 +37,7 @@ pub const VisibilityGate = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Thread-safe; acquires the exclusive side of the runtime visibility gate.
-    pub fn lock_exclusive(self: *VisibilityGate) void {
+    pub fn lockExclusive(self: *VisibilityGate) void {
         self.lock.lock();
     }
 
@@ -48,7 +48,7 @@ pub const VisibilityGate = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Thread-safe; returns whether the exclusive side of the runtime visibility gate was acquired.
-    pub fn try_lock_exclusive(self: *VisibilityGate) bool {
+    pub fn tryLockExclusive(self: *VisibilityGate) bool {
         return self.lock.tryLock();
     }
 
@@ -59,7 +59,7 @@ pub const VisibilityGate = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Thread-safe; releases the exclusive side of the runtime visibility gate.
-    pub fn unlock_exclusive(self: *VisibilityGate) void {
+    pub fn unlockExclusive(self: *VisibilityGate) void {
         self.lock.unlock();
     }
 };

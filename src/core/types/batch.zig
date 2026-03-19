@@ -5,7 +5,7 @@
 const std = @import("std");
 const Value = @import("value.zig").Value;
 
-/// One plain key/value write request for `apply_batch`.
+/// One plain key/value write request for `applyBatch`.
 ///
 /// Ownership:
 /// - `key` is borrowed for the duration of the call that consumes this write.

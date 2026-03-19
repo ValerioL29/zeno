@@ -87,7 +87,7 @@ pub const Database = struct {
     /// the barrier cannot be acquired, then writers and new readers are blocked globally during
     /// the barrier once acquired and writers are blocked globally again during each shard-serialization window.
     pub fn checkpoint(self: *Database) EngineError!void {
-        return metrics.call_with_latency(&self.state, lifecycle.checkpoint, .{self});
+        return metrics.callWithLatency(&self.state, lifecycle.checkpoint, .{self});
     }
 
     /// Rebuilds runtime shard storage from a fresh snapshot checkpoint to reclaim retained arena churn.
@@ -104,8 +104,8 @@ pub const Database = struct {
     /// Thread Safety: Not safe to call concurrently with other mutation of the same engine handle.
     /// Follows checkpoint barrier semantics and may return `error.CheckpointBusy` when active
     /// `ReadView` handles block the barrier.
-    pub fn compact_memory(self: *Database) EngineError!void {
-        return metrics.call_with_latency(&self.state, lifecycle.compact_memory, .{self});
+    pub fn compactMemory(self: *Database) EngineError!void {
+        return metrics.callWithLatency(&self.state, lifecycle.compactMemory, .{self});
     }
 
     /// Rebuilds one shard in place to reclaim retained arena churn.
@@ -118,8 +118,8 @@ pub const Database = struct {
     ///
     /// Thread Safety: Synchronous maintenance operation. Not safe to call concurrently
     /// with other mutation of the same engine handle.
-    pub fn compact_shard(self: *Database, shard_idx: usize) EngineError!void {
-        return metrics.call_with_latency(&self.state, lifecycle.compact_shard, .{ self, shard_idx });
+    pub fn compactShard(self: *Database, shard_idx: usize) EngineError!void {
+        return metrics.callWithLatency(&self.state, lifecycle.compactShard, .{ self, shard_idx });
     }
 
     /// Rebuilds all shards in place to reclaim retained arena churn.
@@ -138,8 +138,8 @@ pub const Database = struct {
     ///
     /// Thread Safety: Synchronous maintenance operation. Not safe to call concurrently
     /// with other mutation of the same engine handle.
-    pub fn compact_all(self: *Database) EngineError!void {
-        return metrics.call_with_latency(&self.state, lifecycle.compact_all, .{self});
+    pub fn compactAll(self: *Database) EngineError!void {
+        return metrics.callWithLatency(&self.state, lifecycle.compactAll, .{self});
     }
 
     /// Reads one key from the engine contract surface.
@@ -150,7 +150,7 @@ pub const Database = struct {
     ///
     /// Ownership: Returns a caller-owned cloned value when non-null. The caller must later call `deinit` with `allocator`.
     pub fn get(self: *const Database, allocator: std.mem.Allocator, key: []const u8) EngineError!?types.Value {
-        return metrics.call_with_latency(&self.state, read.get, .{ &self.state, allocator, key });
+        return metrics.callWithLatency(&self.state, read.get, .{ &self.state, allocator, key });
     }
 
     /// Returns whether `key` is present and TTL-visible in the engine.
@@ -164,7 +164,7 @@ pub const Database = struct {
     /// Thread Safety: Lock-free via the shard seqlock; safe for concurrent use with
     /// point writes and scans.
     pub fn exists(self: *const Database, key: []const u8) EngineError!bool {
-        return metrics.call_with_latency(&self.state, read.exists, .{ &self.state, key });
+        return metrics.callWithLatency(&self.state, read.exists, .{ &self.state, key });
     }
 
     /// Reads multiple keys in a single call and returns one owned result per key.
@@ -186,7 +186,7 @@ pub const Database = struct {
         allocator: std.mem.Allocator,
         keys: []const []const u8,
     ) EngineError!types.GetManyResult {
-        return metrics.call_with_latency(&self.state, read.getMany, .{ &self.state, allocator, keys });
+        return metrics.callWithLatency(&self.state, read.getMany, .{ &self.state, allocator, keys });
     }
 
     /// Writes one plain key/value pair through the engine contract surface.
@@ -200,9 +200,9 @@ pub const Database = struct {
     /// Thread Safety: Safe for concurrent use with other point operations; acquires the global visibility gate exclusively before taking one shard-exclusive lock.
     pub fn put(self: *Database, key: []const u8, value: *const types.Value) EngineError!void {
         const heavy_events_before = self.state.counters.overwritten_heavy_events_total.load(.monotonic);
-        try metrics.call_with_latency(&self.state, write.put, .{ &self.state, key, value });
-        self.maybe_run_heavy_overwrite_compaction(heavy_events_before);
-        self.maybe_run_wal_checkpoint();
+        try metrics.callWithLatency(&self.state, write.put, .{ &self.state, key, value });
+        self.maybeRunHeavyOverwriteCompaction(heavy_events_before);
+        self.maybeRunWalCheckpoint();
     }
 
     /// Writes multiple plain key/value pairs as independent standalone mutations.
@@ -216,14 +216,14 @@ pub const Database = struct {
     /// Thread Safety: Safe for concurrent use with reads and scans; acquires shard-local shared visibility gates and shard-exclusive locks per touched shard.
     ///
     /// Durability Semantics: Non-atomic as a group. On failure, any durable/live prefix applied before the failure may remain.
-    pub fn put_group(self: *Database, writes: []const types.PutWrite) EngineError!void {
+    pub fn putGroup(self: *Database, writes: []const types.PutWrite) EngineError!void {
         const heavy_events_before = self.state.counters.overwritten_heavy_events_total.load(.monotonic);
-        try metrics.call_with_latency(&self.state, write.put_group, .{ &self.state, writes });
-        self.maybe_run_heavy_overwrite_compaction(heavy_events_before);
-        self.maybe_run_wal_checkpoint();
+        try metrics.callWithLatency(&self.state, write.putGroup, .{ &self.state, writes });
+        self.maybeRunHeavyOverwriteCompaction(heavy_events_before);
+        self.maybeRunWalCheckpoint();
     }
 
-    fn maybe_run_heavy_overwrite_compaction(self: *Database, heavy_events_before: u64) void {
+    fn maybeRunHeavyOverwriteCompaction(self: *Database, heavy_events_before: u64) void {
         const compact_every = self.auto_compaction.every orelse return;
         const compact_every_u64: u64 = @as(u64, compact_every);
 
@@ -235,33 +235,33 @@ pub const Database = struct {
         const next_tick = previous_tick + events_delta;
         if ((previous_tick / compact_every_u64) == (next_tick / compact_every_u64)) return;
 
-        if (!self.begin_heavy_overwrite_compaction()) return;
-        defer self.end_heavy_overwrite_compaction();
+        if (!self.beginHeavyOverwriteCompaction()) return;
+        defer self.endHeavyOverwriteCompaction();
 
-        lifecycle.compact_all(self) catch {};
+        lifecycle.compactAll(self) catch {};
     }
 
-    fn begin_heavy_overwrite_compaction(self: *Database) bool {
+    fn beginHeavyOverwriteCompaction(self: *Database) bool {
         return self.auto_compaction.in_progress.cmpxchgStrong(false, true, .acq_rel, .monotonic) == null;
     }
 
-    fn end_heavy_overwrite_compaction(self: *Database) void {
+    fn endHeavyOverwriteCompaction(self: *Database) void {
         self.auto_compaction.in_progress.store(false, .release);
     }
 
     /// Runs one automatic checkpoint when the configured WAL byte threshold is crossed.
-    fn maybe_run_wal_checkpoint(self: *Database) void {
+    fn maybeRunWalCheckpoint(self: *Database) void {
         const max_bytes = self.auto_wal_checkpoint.max_bytes orelse return;
         const wal = self.state.wal orelse return;
         if (self.state.snapshot_path == null) return;
-        if (wal.wal_bytes_pending() < max_bytes) return;
-        if (!self.begin_wal_checkpoint()) return;
-        defer self.end_wal_checkpoint();
+        if (wal.walBytesPending() < max_bytes) return;
+        if (!self.beginWalCheckpoint()) return;
+        defer self.endWalCheckpoint();
         lifecycle.checkpoint(self) catch {};
     }
 
     /// Attempts to acquire the auto-checkpoint re-entry guard.
-    fn begin_wal_checkpoint(self: *Database) bool {
+    fn beginWalCheckpoint(self: *Database) bool {
         return self.auto_wal_checkpoint.in_progress.cmpxchgStrong(
             false,
             true,
@@ -271,7 +271,7 @@ pub const Database = struct {
     }
 
     /// Releases the auto-checkpoint re-entry guard.
-    fn end_wal_checkpoint(self: *Database) void {
+    fn endWalCheckpoint(self: *Database) void {
         self.auto_wal_checkpoint.in_progress.store(false, .release);
     }
 
@@ -282,10 +282,10 @@ pub const Database = struct {
     /// Allocator: Does not allocate beyond the OS thread stack.
     ///
     /// Thread Safety: Must be called before the engine handle is shared across threads.
-    pub fn start_ttl_sweeper(self: *Database, interval_ms: u32) !void {
+    pub fn startTtlSweeper(self: *Database, interval_ms: u32) !void {
         self.ttl_sweeper.interval_ms = interval_ms;
         self.ttl_sweeper.stop.store(false, .release);
-        self.ttl_sweeper.thread = try std.Thread.spawn(.{}, ttl_sweep_thread_main, .{self});
+        self.ttl_sweeper.thread = try std.Thread.spawn(.{}, ttlSweepThreadMain, .{self});
     }
 
     /// Signals the sweep thread to stop and joins it.
@@ -295,7 +295,7 @@ pub const Database = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Safe to call from the engine owner thread during close.
-    pub fn stop_ttl_sweeper(self: *Database) void {
+    pub fn stopTtlSweeper(self: *Database) void {
         self.ttl_sweeper.stop.store(true, .release);
         if (self.ttl_sweeper.thread) |thread| {
             thread.join();
@@ -303,7 +303,7 @@ pub const Database = struct {
         }
     }
 
-    fn ttl_sweep_thread_main(db: *Database) void {
+    fn ttlSweepThreadMain(db: *Database) void {
         const interval_ns = @as(u64, db.ttl_sweeper.interval_ms) * std.time.ns_per_ms;
 
         while (!db.ttl_sweeper.stop.load(.acquire)) {
@@ -312,7 +312,7 @@ pub const Database = struct {
 
             for (0..runtime_state.NUM_SHARDS) |shard_idx| {
                 if (db.ttl_sweeper.stop.load(.acquire)) break;
-                expiration.sweep_expired_entries_for_shard(&db.state, shard_idx, db.allocator);
+                expiration.sweepExpiredEntriesForShard(&db.state, shard_idx, db.allocator);
             }
         }
     }
@@ -325,8 +325,8 @@ pub const Database = struct {
     ///
     /// Thread Safety: Safe for concurrent use with other point operations; acquires the global visibility gate exclusively before taking one shard-exclusive lock and appends the live DELETE record inside that same visibility window.
     pub fn delete(self: *Database, key: []const u8) EngineError!bool {
-        const result = try metrics.call_with_latency(&self.state, write.delete, .{ &self.state, key });
-        self.maybe_run_wal_checkpoint();
+        const result = try metrics.callWithLatency(&self.state, write.delete, .{ &self.state, key });
+        self.maybeRunWalCheckpoint();
         return result;
     }
 
@@ -344,13 +344,13 @@ pub const Database = struct {
     ///
     /// Thread Safety: Safe for concurrent use with point reads; acquires shared visibility
     /// gate and shard-exclusive lock per shard sequentially.
-    pub fn delete_prefix(self: *Database, prefix: []const u8) EngineError!u64 {
-        const deleted = try metrics.call_with_latency(
+    pub fn deletePrefix(self: *Database, prefix: []const u8) EngineError!u64 {
+        const deleted = try metrics.callWithLatency(
             &self.state,
-            write.delete_prefix,
+            write.deletePrefix,
             .{ &self.state, prefix, self.allocator },
         );
-        if (deleted > 0) self.maybe_run_wal_checkpoint();
+        if (deleted > 0) self.maybeRunWalCheckpoint();
         return deleted;
     }
 
@@ -361,9 +361,9 @@ pub const Database = struct {
     /// Allocator: Uses the engine base allocator when inserting a new TTL entry and may allocate delegated WAL record scratch for durable live mutations.
     ///
     /// Thread Safety: Safe for concurrent use with reads and scans; acquires the global visibility gate exclusively before taking one shard-exclusive lock.
-    pub fn expire_at(self: *Database, key: []const u8, unix_seconds: ?i64) EngineError!bool {
-        const result = try metrics.call_with_latency(&self.state, expire_at_boundary, .{ self, key, unix_seconds });
-        self.maybe_run_wal_checkpoint();
+    pub fn expireAt(self: *Database, key: []const u8, unix_seconds: ?i64) EngineError!bool {
+        const result = try metrics.callWithLatency(&self.state, expireAtBoundary, .{ self, key, unix_seconds });
+        self.maybeRunWalCheckpoint();
         return result;
     }
 
@@ -375,7 +375,7 @@ pub const Database = struct {
     ///
     /// Thread Safety: Acquires the shared side of the global visibility gate before taking one shard shared lock for TTL reads and only attempts lazy cleanup afterward if the exclusive visibility gate can be acquired immediately.
     pub fn ttl(self: *const Database, key: []const u8) EngineError!i64 {
-        return metrics.call_with_latency(&self.state, expiration.ttl, .{ @constCast(&self.state), key });
+        return metrics.callWithLatency(&self.state, expiration.ttl, .{ @constCast(&self.state), key });
     }
 
     /// Performs a full prefix scan over the current visible state.
@@ -387,12 +387,12 @@ pub const Database = struct {
     /// Ownership: Returns a result that owns all returned keys and values until `deinit`.
     ///
     /// Thread Safety: Acquires the shared side of the global visibility gate before taking shard shared locks to collect entries.
-    pub fn scan_prefix(
+    pub fn scanPrefix(
         self: *const Database,
         allocator: std.mem.Allocator,
         prefix: []const u8,
     ) EngineError!types.ScanResult {
-        return metrics.call_with_latency(&self.state, scan_ops.scan_prefix, .{ &self.state, allocator, prefix });
+        return metrics.callWithLatency(&self.state, scan_ops.scanPrefix, .{ &self.state, allocator, prefix });
     }
 
     /// Performs a full range scan over the current visible state.
@@ -404,12 +404,12 @@ pub const Database = struct {
     /// Ownership: Returns a result that owns all returned keys and values until `deinit`.
     ///
     /// Thread Safety: Acquires the shared side of the global visibility gate before taking shard shared locks to collect entries.
-    pub fn scan_range(
+    pub fn scanRange(
         self: *const Database,
         allocator: std.mem.Allocator,
         range: types.KeyRange,
     ) EngineError!types.ScanResult {
-        return metrics.call_with_latency(&self.state, scan_ops.scan_range, .{ &self.state, allocator, range });
+        return metrics.callWithLatency(&self.state, scan_ops.scanRange, .{ &self.state, allocator, range });
     }
 
     /// Applies one plain atomic batch.
@@ -421,9 +421,9 @@ pub const Database = struct {
     /// Ownership: Clones all surviving write values into engine-owned storage before making the batch visible.
     ///
     /// Thread Safety: Safe for concurrent use with point operations and read views; acquires the global visibility gate exclusively for the full apply window.
-    pub fn apply_batch(self: *Database, writes: []const types.PutWrite) EngineError!void {
-        try metrics.call_with_latency(&self.state, batch_ops.apply_batch, .{ &self.state, self.allocator, writes });
-        self.maybe_run_wal_checkpoint();
+    pub fn applyBatch(self: *Database, writes: []const types.PutWrite) EngineError!void {
+        try metrics.callWithLatency(&self.state, batch_ops.applyBatch, .{ &self.state, self.allocator, writes });
+        self.maybeRunWalCheckpoint();
     }
 
     /// Opens one consistent read view.
@@ -435,8 +435,8 @@ pub const Database = struct {
     /// Ownership: Returns a `ReadView` that keeps one registry-backed visibility hold alive until `deinit` is called.
     ///
     /// Thread Safety: Acquires the shared side of the global visibility gate and keeps it held for the lifetime of the returned `ReadView`.
-    pub fn read_view(self: *Database) EngineError!types.ReadView {
-        return metrics.call_with_latency(&self.state, read.read_view, .{&self.state});
+    pub fn readView(self: *Database) EngineError!types.ReadView {
+        return metrics.callWithLatency(&self.state, read.readView, .{&self.state});
     }
 };
 
@@ -464,18 +464,18 @@ pub fn open(allocator: std.mem.Allocator, options: types.DatabaseOptions) Engine
 ///
 /// Allocator: Allocates owned entry keys and values plus any continuation cursor through `allocator`.
 ///
-/// Ownership: `cursor` is borrowed when present and must remain valid for the duration of the call. The returned page exposes any continuation cursor through `borrow_next_cursor` and may transfer it into `OwnedScanCursor` through `take_next_cursor`.
+/// Ownership: `cursor` is borrowed when present and must remain valid for the duration of the call. The returned page exposes any continuation cursor through `borrowNextCursor` and may transfer it into `OwnedScanCursor` through `takeNextCursor`.
 ///
 /// Thread Safety: Relies on the caller-owned `ReadView` visibility hold and takes shard shared locks while fetching or refilling shard-local ART heads.
-pub fn scan_prefix_from_in_view(
+pub fn scanPrefixFromInView(
     view: *const types.ReadView,
     allocator: std.mem.Allocator,
     prefix: []const u8,
     cursor: ?*const types.ScanCursor,
     limit: usize,
 ) EngineError!types.ScanPageResult {
-    const state = runtime_state_from_view_for_latency(view);
-    return metrics.call_with_optional_latency(state, scan_ops.scan_prefix_from_in_view, .{ view, allocator, prefix, cursor, limit });
+    const state = runtimeStateFromViewForLatency(view);
+    return metrics.callWithOptionalLatency(state, scan_ops.scanPrefixFromInView, .{ view, allocator, prefix, cursor, limit });
 }
 
 /// Scans the next range page inside a consistent read view.
@@ -484,18 +484,18 @@ pub fn scan_prefix_from_in_view(
 ///
 /// Allocator: Allocates owned entry keys and values plus any continuation cursor through `allocator`.
 ///
-/// Ownership: `cursor` is borrowed when present and must remain valid for the duration of the call. The returned page exposes any continuation cursor through `borrow_next_cursor` and may transfer it into `OwnedScanCursor` through `take_next_cursor`.
+/// Ownership: `cursor` is borrowed when present and must remain valid for the duration of the call. The returned page exposes any continuation cursor through `borrowNextCursor` and may transfer it into `OwnedScanCursor` through `takeNextCursor`.
 ///
 /// Thread Safety: Relies on the caller-owned `ReadView` visibility hold and takes shard shared locks while fetching or refilling shard-local ART heads.
-pub fn scan_range_from_in_view(
+pub fn scanRangeFromInView(
     view: *const types.ReadView,
     allocator: std.mem.Allocator,
     range: types.KeyRange,
     cursor: ?*const types.ScanCursor,
     limit: usize,
 ) EngineError!types.ScanPageResult {
-    const state = runtime_state_from_view_for_latency(view);
-    return metrics.call_with_optional_latency(state, scan_ops.scan_range_from_in_view, .{ view, allocator, range, cursor, limit });
+    const state = runtimeStateFromViewForLatency(view);
+    return metrics.callWithOptionalLatency(state, scan_ops.scanRangeFromInView, .{ view, allocator, range, cursor, limit });
 }
 
 /// Applies one checked batch under the official advanced contract.
@@ -507,30 +507,30 @@ pub fn scan_range_from_in_view(
 /// Ownership: Clones all surviving write values into engine-owned storage before making the batch visible.
 ///
 /// Thread Safety: Safe for concurrent use with point operations and read views; acquires the global visibility gate exclusively for the full guard-check and apply window.
-pub fn apply_checked_batch(db: *Database, batch: types.CheckedBatch) EngineError!void {
-    return metrics.call_with_latency(&db.state, batch_ops.apply_checked_batch, .{ &db.state, db.allocator, batch });
+pub fn applyCheckedBatch(db: *Database, batch: types.CheckedBatch) EngineError!void {
+    return metrics.callWithLatency(&db.state, batch_ops.applyCheckedBatch, .{ &db.state, db.allocator, batch });
 }
 
-fn set_ttl_for_test(db: *Database, key: []const u8, expire_at_seconds: i64) !void {
-    const shard_idx = runtime_shard.get_shard_index(key);
+fn setTtlForTest(db: *Database, key: []const u8, expire_at_seconds: i64) !void {
+    const shard_idx = runtime_shard.getShardIndex(key);
     const shard = &db.state.shards[shard_idx];
 
     shard.lock.lock();
     defer shard.lock.unlock();
-    try internal_ttl_index.set_ttl_entry(shard, key, expire_at_seconds);
+    try internal_ttl_index.setTtlEntry(shard, key, expire_at_seconds);
 }
 
-fn has_ttl_for_test(db: *Database, key: []const u8) bool {
-    const shard_idx = runtime_shard.get_shard_index(key);
+fn hasTtlForTest(db: *Database, key: []const u8) bool {
+    const shard_idx = runtime_shard.getShardIndex(key);
     const shard = &db.state.shards[shard_idx];
 
     shard.lock.lockShared();
     defer shard.lock.unlockShared();
-    return internal_ttl_index.get_expire_at(shard, key) != null;
+    return internal_ttl_index.getExpireAt(shard, key) != null;
 }
 
-fn has_stored_key_for_test(db: *Database, key: []const u8) bool {
-    const shard_idx = runtime_shard.get_shard_index(key);
+fn hasStoredKeyForTest(db: *Database, key: []const u8) bool {
+    const shard_idx = runtime_shard.getShardIndex(key);
     const shard = &db.state.shards[shard_idx];
 
     shard.lock.lockShared();
@@ -538,32 +538,32 @@ fn has_stored_key_for_test(db: *Database, key: []const u8) bool {
     return shard.tree.lookup(key) != null;
 }
 
-fn value_is_heap_owned_for_test(db: *Database, key: []const u8) bool {
-    const shard_idx = runtime_shard.get_shard_index(key);
+fn valueIsHeapOwnedForTest(db: *Database, key: []const u8) bool {
+    const shard_idx = runtime_shard.getShardIndex(key);
     const shard = &db.state.shards[shard_idx];
 
     shard.lock.lockShared();
     defer shard.lock.unlockShared();
-    return internal_mutate.value_is_heap_owned_unlocked(shard, key);
+    return internal_mutate.valueIsHeapOwnedUnlocked(shard, key);
 }
 
-fn total_committed_arenas_for_test(db: *Database) usize {
+fn totalCommittedArenasForTest(db: *Database) usize {
     var total: usize = 0;
     for (&db.state.shards) |*shard| {
         shard.lock.lockShared();
-        total += internal_mutate.count_committed_arenas_unlocked(shard);
+        total += internal_mutate.countCommittedArenasUnlocked(shard);
         shard.lock.unlockShared();
     }
     return total;
 }
 
-fn try_lock_all_shard_visibility_gates_exclusive_for_test(db: *Database) bool {
+fn tryLockAllShardVisibilityGatesExclusiveForTest(db: *Database) bool {
     var locked: usize = 0;
     while (locked < db.state.shards.len) : (locked += 1) {
-        if (!db.state.shards[locked].visibility_gate.try_lock_exclusive()) {
+        if (!db.state.shards[locked].visibility_gate.tryLockExclusive()) {
             var release_idx: usize = 0;
             while (release_idx < locked) : (release_idx += 1) {
-                db.state.shards[release_idx].visibility_gate.unlock_exclusive();
+                db.state.shards[release_idx].visibility_gate.unlockExclusive();
             }
             return false;
         }
@@ -571,33 +571,33 @@ fn try_lock_all_shard_visibility_gates_exclusive_for_test(db: *Database) bool {
     return true;
 }
 
-fn unlock_all_shard_visibility_gates_exclusive_for_test(db: *Database) void {
-    for (&db.state.shards) |*shard| shard.visibility_gate.unlock_exclusive();
+fn unlockAllShardVisibilityGatesExclusiveForTest(db: *Database) void {
+    for (&db.state.shards) |*shard| shard.visibility_gate.unlockExclusive();
 }
 
-fn expire_at_boundary(db: *Database, key: []const u8, unix_seconds: ?i64) EngineError!bool {
-    const updated = try expiration.expire_at(&db.state, key, unix_seconds);
-    db.state.record_operation(.expire, 1);
+fn expireAtBoundary(db: *Database, key: []const u8, unix_seconds: ?i64) EngineError!bool {
+    const updated = try expiration.expireAt(&db.state, key, unix_seconds);
+    db.state.recordOperation(.expire, 1);
     return updated;
 }
 
-fn runtime_state_from_view_for_latency(view: *const types.ReadView) ?*const runtime_state.DatabaseState {
-    const opaque_state = view.resolve_runtime_state() orelse return null;
+fn runtimeStateFromViewForLatency(view: *const types.ReadView) ?*const runtime_state.DatabaseState {
+    const opaque_state = view.resolveRuntimeState() orelse return null;
     return @ptrCast(@alignCast(opaque_state));
 }
 
-fn latency_samples_for_test(db: *const Database) u64 {
-    return db.state.stats_snapshot().latency_samples_total;
+fn latencySamplesForTest(db: *const Database) u64 {
+    return db.state.statsSnapshot().latency_samples_total;
 }
 
-fn current_checkpoint_lsn_for_test(db: *Database) u64 {
+fn currentCheckpointLsnForTest(db: *Database) u64 {
     if (db.state.wal) |wal| {
         if (wal.next_lsn > 0) return wal.next_lsn - 1;
     }
     return 0;
 }
 
-fn corrupt_file_byte_for_test(path: []const u8, offset: u64, mask: u8) !void {
+fn corruptFileByteForTest(path: []const u8, offset: u64, mask: u8) !void {
     const file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
     defer file.close();
 
@@ -609,35 +609,35 @@ fn corrupt_file_byte_for_test(path: []const u8, offset: u64, mask: u8) !void {
     try file.writeAll(&byte);
 }
 
-fn alloc_tmp_path_test(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, basename: []const u8) ![]u8 {
+fn allocTmpPathTest(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, basename: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, basename });
 }
 
 var noop_replay_ctx: u8 = 0;
 
-fn noop_replay_put(ctx: *anyopaque, key: []const u8, value: *const types.Value) !void {
+fn noopReplayPut(ctx: *anyopaque, key: []const u8, value: *const types.Value) !void {
     _ = ctx;
     _ = key;
     _ = value;
 }
 
-fn noop_replay_delete(ctx: *anyopaque, key: []const u8) !void {
+fn noopReplayDelete(ctx: *anyopaque, key: []const u8) !void {
     _ = ctx;
     _ = key;
 }
 
-fn noop_replay_expire(ctx: *anyopaque, key: []const u8, expire_at_sec: i64) !void {
+fn noopReplayExpire(ctx: *anyopaque, key: []const u8, expire_at_sec: i64) !void {
     _ = ctx;
     _ = key;
     _ = expire_at_sec;
 }
 
-fn attach_test_wal(db: *Database, path: []const u8, fsync_mode: types.FsyncMode) !void {
+fn attachTestWal(db: *Database, path: []const u8, fsync_mode: types.FsyncMode) !void {
     db.state.wal = try storage_wal.open(path, .{ .fsync_mode = fsync_mode }, .{
         .ctx = &noop_replay_ctx,
-        .put = noop_replay_put,
-        .delete = noop_replay_delete,
-        .expire = noop_replay_expire,
+        .put = noopReplayPut,
+        .delete = noopReplayDelete,
+        .expire = noopReplayExpire,
     }, db.allocator);
 }
 
@@ -649,7 +649,7 @@ const CheckpointThreadState = struct {
     checkpoint_error: ?EngineError = null,
 };
 
-fn run_checkpoint_in_thread(state: *CheckpointThreadState) void {
+fn runCheckpointInThread(state: *CheckpointThreadState) void {
     state.db.checkpoint() catch |err| {
         state.checkpoint_error = err;
         state.finished.store(true, .release);
@@ -674,7 +674,7 @@ test "snapshot-only open restores values and ttl metadata without incrementing c
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "step9-snapshot-only.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "step9-snapshot-only.snapshot");
     defer testing.allocator.free(snapshot_path);
 
     {
@@ -685,7 +685,7 @@ test "snapshot-only open restores values and ttl metadata without incrementing c
         const beta = types.Value{ .integer = 7 };
         try db.put("alpha", &alpha);
         try db.put("beta", &beta);
-        try set_ttl_for_test(db, "alpha", runtime_shard.unix_now() + 60);
+        try setTtlForTest(db, "alpha", runtime_shard.unixNow() + 60);
 
         _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, 33);
     }
@@ -715,7 +715,7 @@ test "wal-only open replays recovered keys deletes and ttl metadata without incr
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-open-replay.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "step7-open-replay.wal");
     defer testing.allocator.free(wal_path);
 
     {
@@ -732,7 +732,7 @@ test "wal-only open replays recovered keys deletes and ttl metadata without incr
         try db.put("beta", &beta);
         try db.put("gamma", &gamma);
         try testing.expect(try db.delete("beta"));
-        try testing.expect(try db.expire_at("gamma", runtime_shard.unix_now() + 60));
+        try testing.expect(try db.expireAt("gamma", runtime_shard.unixNow() + 60));
     }
 
     const reopened = try open(testing.allocator, .{
@@ -758,9 +758,9 @@ test "snapshot-backed open replays wal delta after the snapshot lsn" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "step9-delta.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "step9-delta.wal");
     defer testing.allocator.free(wal_path);
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "step9-delta.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "step9-delta.snapshot");
     defer testing.allocator.free(snapshot_path);
 
     {
@@ -775,14 +775,14 @@ test "snapshot-backed open replays wal delta after the snapshot lsn" {
         try db.put("alpha", &one);
         try db.put("beta", &two);
 
-        _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, current_checkpoint_lsn_for_test(db));
+        _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, currentCheckpointLsnForTest(db));
 
         const replacement = types.Value{ .integer = 9 };
         const gamma = types.Value{ .string = "delta" };
         try db.put("alpha", &replacement);
         try testing.expect(try db.delete("beta"));
         try db.put("gamma", &gamma);
-        try testing.expect(try db.expire_at("gamma", runtime_shard.unix_now() + 60));
+        try testing.expect(try db.expireAt("gamma", runtime_shard.unixNow() + 60));
     }
 
     const reopened = try open(testing.allocator, .{
@@ -812,9 +812,9 @@ test "corrupted snapshot falls back to full wal replay when wal is non-empty" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "step9-fallback.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "step9-fallback.wal");
     defer testing.allocator.free(wal_path);
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "step9-fallback.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "step9-fallback.snapshot");
     defer testing.allocator.free(snapshot_path);
 
     {
@@ -827,11 +827,11 @@ test "corrupted snapshot falls back to full wal replay when wal is non-empty" {
         const alpha = types.Value{ .integer = 1 };
         const beta = types.Value{ .integer = 2 };
         try db.put("alpha", &alpha);
-        _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, current_checkpoint_lsn_for_test(db));
+        _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, currentCheckpointLsnForTest(db));
         try db.put("beta", &beta);
     }
 
-    try corrupt_file_byte_for_test(snapshot_path, 0, 0xff);
+    try corruptFileByteForTest(snapshot_path, 0, 0xff);
 
     const reopened = try open(testing.allocator, .{
         .snapshot_path = snapshot_path,
@@ -850,7 +850,7 @@ test "corrupted snapshot falls back to full wal replay when wal is non-empty" {
     try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_put_total.load(.monotonic));
     try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_delete_total.load(.monotonic));
     try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_expire_total.load(.monotonic));
-    try testing.expectEqual(@as(u64, 1), reopened.state.stats_snapshot().snapshot_corruption_fallback_total);
+    try testing.expectEqual(@as(u64, 1), reopened.state.statsSnapshot().snapshot_corruption_fallback_total);
 }
 
 test "corrupted snapshot with missing wal returns snapshot corrupted" {
@@ -859,9 +859,9 @@ test "corrupted snapshot with missing wal returns snapshot corrupted" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "step9-missing-wal.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "step9-missing-wal.snapshot");
     defer testing.allocator.free(snapshot_path);
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "missing.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "missing.wal");
     defer testing.allocator.free(wal_path);
 
     {
@@ -873,7 +873,7 @@ test "corrupted snapshot with missing wal returns snapshot corrupted" {
         _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, 0);
     }
 
-    try corrupt_file_byte_for_test(snapshot_path, 0, 0xff);
+    try corruptFileByteForTest(snapshot_path, 0, 0xff);
 
     try testing.expectError(error.SnapshotCorrupted, open(testing.allocator, .{
         .snapshot_path = snapshot_path,
@@ -888,9 +888,9 @@ test "corrupted snapshot with empty wal returns snapshot corrupted" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "step9-empty-wal.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "step9-empty-wal.snapshot");
     defer testing.allocator.free(snapshot_path);
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "empty.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "empty.wal");
     defer testing.allocator.free(wal_path);
 
     {
@@ -906,7 +906,7 @@ test "corrupted snapshot with empty wal returns snapshot corrupted" {
         const file = try std.fs.cwd().createFile(wal_path, .{ .truncate = true });
         file.close();
     }
-    try corrupt_file_byte_for_test(snapshot_path, 0, 0xff);
+    try corruptFileByteForTest(snapshot_path, 0, 0xff);
 
     try testing.expectError(error.SnapshotCorrupted, open(testing.allocator, .{
         .snapshot_path = snapshot_path,
@@ -921,9 +921,9 @@ test "open purges expired keys recovered from snapshot and wal replay" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "step9-purge.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "step9-purge.wal");
     defer testing.allocator.free(wal_path);
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "step9-purge.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "step9-purge.snapshot");
     defer testing.allocator.free(snapshot_path);
 
     {
@@ -936,11 +936,11 @@ test "open purges expired keys recovered from snapshot and wal replay" {
         const snapshot_value = types.Value{ .integer = 1 };
         const wal_value = types.Value{ .integer = 2 };
         try db.put("snapshot:expired", &snapshot_value);
-        try set_ttl_for_test(db, "snapshot:expired", runtime_shard.unix_now() - 10);
-        _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, current_checkpoint_lsn_for_test(db));
+        try setTtlForTest(db, "snapshot:expired", runtime_shard.unixNow() - 10);
+        _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, currentCheckpointLsnForTest(db));
 
-        try db.state.wal.?.append_put("wal:expired", &wal_value);
-        try db.state.wal.?.append_expire("wal:expired", runtime_shard.unix_now() - 10);
+        try db.state.wal.?.appendPut("wal:expired", &wal_value);
+        try db.state.wal.?.appendExpire("wal:expired", runtime_shard.unixNow() - 10);
     }
 
     const reopened = try open(testing.allocator, .{
@@ -954,10 +954,10 @@ test "open purges expired keys recovered from snapshot and wal replay" {
     try testing.expect((try reopened.get(testing.allocator, "wal:expired")) == null);
     try testing.expectEqual(@as(i64, -2), try reopened.ttl("snapshot:expired"));
     try testing.expectEqual(@as(i64, -2), try reopened.ttl("wal:expired"));
-    try testing.expect(!has_ttl_for_test(reopened, "snapshot:expired"));
-    try testing.expect(!has_ttl_for_test(reopened, "wal:expired"));
-    try testing.expect(!has_stored_key_for_test(reopened, "snapshot:expired"));
-    try testing.expect(!has_stored_key_for_test(reopened, "wal:expired"));
+    try testing.expect(!hasTtlForTest(reopened, "snapshot:expired"));
+    try testing.expect(!hasTtlForTest(reopened, "wal:expired"));
+    try testing.expect(!hasStoredKeyForTest(reopened, "snapshot:expired"));
+    try testing.expect(!hasStoredKeyForTest(reopened, "wal:expired"));
     try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_put_total.load(.monotonic));
     try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_delete_total.load(.monotonic));
     try testing.expectEqual(@as(u64, 0), reopened.state.counters.ops_expire_total.load(.monotonic));
@@ -972,7 +972,7 @@ test "checkpoint without a configured snapshot path returns no snapshot path" {
     defer db.close() catch unreachable;
 
     try testing.expectError(error.NoSnapshotPath, db.checkpoint());
-    const stats = db.state.stats_snapshot();
+    const stats = db.state.statsSnapshot();
     try testing.expectEqual(@as(u64, 1), stats.latency_samples_total);
     try testing.expectEqual(@as(u64, 0), stats.checkpoint_count_total);
     try testing.expectEqual(@as(u64, 0), stats.checkpoint_busy_total);
@@ -988,7 +988,7 @@ test "compact memory without a configured snapshot path returns no snapshot path
     });
     defer db.close() catch unreachable;
 
-    try testing.expectError(error.NoSnapshotPath, db.compact_memory());
+    try testing.expectError(error.NoSnapshotPath, db.compactMemory());
 }
 
 test "compact_shard validates shard index" {
@@ -997,7 +997,7 @@ test "compact_shard validates shard index" {
     const db = try create(testing.allocator);
     defer db.close() catch unreachable;
 
-    try testing.expectError(error.InvalidShardIndex, db.compact_shard(runtime_shard.NUM_SHARDS));
+    try testing.expectError(error.InvalidShardIndex, db.compactShard(runtime_shard.NUM_SHARDS));
 }
 
 test "checkpoint writes a snapshot and reopens the same visible state" {
@@ -1006,7 +1006,7 @@ test "checkpoint writes a snapshot and reopens the same visible state" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-checkpoint.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "step7-checkpoint.snapshot");
     defer testing.allocator.free(snapshot_path);
 
     {
@@ -1019,9 +1019,9 @@ test "checkpoint writes a snapshot and reopens the same visible state" {
         const beta_value = types.Value{ .integer = 7 };
         try db.put("alpha", &alpha_value);
         try db.put("beta", &beta_value);
-        try testing.expect(try db.expire_at("beta", runtime_shard.unix_now() + 60));
+        try testing.expect(try db.expireAt("beta", runtime_shard.unixNow() + 60));
         try db.checkpoint();
-        const stats = db.state.stats_snapshot();
+        const stats = db.state.statsSnapshot();
         try testing.expectEqual(@as(u64, 1), stats.checkpoint_count_total);
         try testing.expectEqual(@as(u64, 0), stats.checkpoint_busy_total);
         try testing.expectEqual(@as(u64, 0), stats.checkpoint_lsn_last);
@@ -1048,9 +1048,9 @@ test "checkpoint preserves post-snapshot wal delta on reopen" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-delta.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "step7-delta.snapshot");
     defer testing.allocator.free(snapshot_path);
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-delta.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "step7-delta.wal");
     defer testing.allocator.free(wal_path);
 
     {
@@ -1089,7 +1089,7 @@ test "compact memory preserves visible state and reclaims committed arenas" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "compact-memory.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "compact-memory.snapshot");
     defer testing.allocator.free(snapshot_path);
 
     const db = try open(testing.allocator, .{
@@ -1108,13 +1108,13 @@ test "compact memory preserves visible state and reclaims committed arenas" {
         writes[index] = .{ .key = key, .value = &values[index] };
     }
 
-    try db.apply_batch(&writes);
-    try testing.expect(total_committed_arenas_for_test(db) > 0);
+    try db.applyBatch(&writes);
+    try testing.expect(totalCommittedArenasForTest(db) > 0);
 
-    try db.compact_memory();
+    try db.compactMemory();
 
-    try testing.expectEqual(@as(usize, 0), total_committed_arenas_for_test(db));
-    const stats = db.state.stats_snapshot();
+    try testing.expectEqual(@as(usize, 0), totalCommittedArenasForTest(db));
+    const stats = db.state.statsSnapshot();
     try testing.expectEqual(@as(u64, 1), stats.checkpoint_count_total);
     try testing.expectEqual(@as(u64, 0), stats.checkpoint_busy_total);
 
@@ -1138,17 +1138,17 @@ test "compact_shard clears retained heavy estimate and preserves visible value" 
     try db.put("heavy:one", &first);
     try db.put("heavy:one", &second);
 
-    const shard_idx = runtime_shard.get_shard_index("heavy:one");
-    const before = db.state.stats_snapshot();
+    const shard_idx = runtime_shard.getShardIndex("heavy:one");
+    const before = db.state.statsSnapshot();
     try testing.expect(before.overwritten_heavy_bytes_total > 0);
     try testing.expect(before.retained_heavy_bytes_estimate > 0);
-    try testing.expect(db.state.retained_heavy_bytes_estimate_for_shard(shard_idx) > 0);
+    try testing.expect(db.state.retainedHeavyBytesEstimateForShard(shard_idx) > 0);
 
-    try db.compact_shard(shard_idx);
+    try db.compactShard(shard_idx);
 
-    const after = db.state.stats_snapshot();
+    const after = db.state.statsSnapshot();
     try testing.expectEqual(@as(u64, 0), after.retained_heavy_bytes_estimate);
-    try testing.expectEqual(@as(u64, 0), db.state.retained_heavy_bytes_estimate_for_shard(shard_idx));
+    try testing.expectEqual(@as(u64, 0), db.state.retainedHeavyBytesEstimateForShard(shard_idx));
 
     var stored = (try db.get(testing.allocator, "heavy:one")).?;
     defer stored.deinit(testing.allocator);
@@ -1172,12 +1172,12 @@ test "compact_all clears retained heavy estimate across shards" {
     try db.put("{s2}:heavy", &first);
     try db.put("{s2}:heavy", &second);
 
-    const before = db.state.stats_snapshot();
+    const before = db.state.statsSnapshot();
     try testing.expect(before.retained_heavy_bytes_estimate > 0);
 
-    try db.compact_all();
+    try db.compactAll();
 
-    const after = db.state.stats_snapshot();
+    const after = db.state.statsSnapshot();
     try testing.expectEqual(@as(u64, 0), after.retained_heavy_bytes_estimate);
 }
 
@@ -1206,13 +1206,13 @@ test "heavy overwrite retained estimate stays low with heap-owned overwrites" {
         try db.put("heavy:deterministic", &second);
     }
 
-    const before = db.state.stats_snapshot();
+    const before = db.state.statsSnapshot();
     try testing.expect(before.retained_heavy_bytes_estimate <= low_retention_ceiling);
     try testing.expect(before.overwritten_heavy_bytes_total >= before.retained_heavy_bytes_estimate);
 
-    try db.compact_all();
+    try db.compactAll();
 
-    const after = db.state.stats_snapshot();
+    const after = db.state.statsSnapshot();
     try testing.expect(after.retained_heavy_bytes_estimate <= low_retention_ceiling);
     const retained_delta = if (before.retained_heavy_bytes_estimate >= after.retained_heavy_bytes_estimate)
         before.retained_heavy_bytes_estimate - after.retained_heavy_bytes_estimate
@@ -1241,7 +1241,7 @@ test "heavy_overwrite_compact_every triggers automatic maintenance on heavy over
         try db.put("heavy:auto", &second);
     }
 
-    const stats = db.state.stats_snapshot();
+    const stats = db.state.statsSnapshot();
     try testing.expect(stats.overwritten_heavy_events_total > 0);
     try testing.expect(stats.overwritten_heavy_bytes_total > 0);
     try testing.expect(stats.retained_heavy_bytes_estimate <= 1024);
@@ -1264,12 +1264,12 @@ test "heavy overwrite cadence counts per-overwrite events inside one put_group" 
     try db.put("heavy:auto:1", &first);
     try db.put("heavy:auto:2", &first);
 
-    try db.put_group(&.{
+    try db.putGroup(&.{
         .{ .key = "heavy:auto:1", .value = &second },
         .{ .key = "heavy:auto:2", .value = &second },
     });
 
-    const stats = db.state.stats_snapshot();
+    const stats = db.state.statsSnapshot();
     try testing.expect(stats.overwritten_heavy_events_total >= 2);
     try testing.expectEqual(@as(u64, 0), stats.retained_heavy_bytes_estimate);
 }
@@ -1287,7 +1287,7 @@ test "heavy to scalar overwrite still records retained heavy estimate" {
     try db.put("heavy:to:scalar", &heavy);
     try db.put("heavy:to:scalar", &scalar);
 
-    const stats = db.state.stats_snapshot();
+    const stats = db.state.statsSnapshot();
     try testing.expect(stats.overwritten_heavy_events_total >= 1);
     try testing.expect(stats.retained_heavy_bytes_estimate >= 1024);
 }
@@ -1301,64 +1301,64 @@ test "engine boundary latency sampling records one sample per call including err
     defer db.close() catch unreachable;
 
     const value = types.Value{ .integer = 1 };
-    var expected = latency_samples_for_test(db);
+    var expected = latencySamplesForTest(db);
 
     try db.put("alpha", &value);
     expected += 1;
-    try testing.expectEqual(expected, latency_samples_for_test(db));
+    try testing.expectEqual(expected, latencySamplesForTest(db));
 
     var alpha = (try db.get(testing.allocator, "alpha")).?;
     defer alpha.deinit(testing.allocator);
     expected += 1;
-    try testing.expectEqual(expected, latency_samples_for_test(db));
+    try testing.expectEqual(expected, latencySamplesForTest(db));
 
-    try testing.expect(!try db.expire_at("missing", runtime_shard.unix_now() + 30));
+    try testing.expect(!try db.expireAt("missing", runtime_shard.unixNow() + 30));
     expected += 1;
-    try testing.expectEqual(expected, latency_samples_for_test(db));
+    try testing.expectEqual(expected, latencySamplesForTest(db));
 
     _ = try db.ttl("alpha");
     expected += 1;
-    try testing.expectEqual(expected, latency_samples_for_test(db));
+    try testing.expectEqual(expected, latencySamplesForTest(db));
 
-    var prefix = try db.scan_prefix(testing.allocator, "a");
+    var prefix = try db.scanPrefix(testing.allocator, "a");
     defer prefix.deinit();
     expected += 1;
-    try testing.expectEqual(expected, latency_samples_for_test(db));
+    try testing.expectEqual(expected, latencySamplesForTest(db));
 
-    var range = try db.scan_range(testing.allocator, .{
+    var range = try db.scanRange(testing.allocator, .{
         .start = "a",
         .end = "z",
     });
     defer range.deinit();
     expected += 1;
-    try testing.expectEqual(expected, latency_samples_for_test(db));
+    try testing.expectEqual(expected, latencySamplesForTest(db));
 
-    try db.apply_batch(&.{
+    try db.applyBatch(&.{
         .{ .key = "beta", .value = &value },
     });
     expected += 1;
-    try testing.expectEqual(expected, latency_samples_for_test(db));
+    try testing.expectEqual(expected, latencySamplesForTest(db));
 
-    var view = try db.read_view();
+    var view = try db.readView();
     expected += 1;
-    try testing.expectEqual(expected, latency_samples_for_test(db));
+    try testing.expectEqual(expected, latencySamplesForTest(db));
 
-    var in_view_prefix = try scan_prefix_from_in_view(&view, testing.allocator, "", null, 10);
+    var in_view_prefix = try scanPrefixFromInView(&view, testing.allocator, "", null, 10);
     expected += 1;
-    try testing.expectEqual(expected, latency_samples_for_test(db));
+    try testing.expectEqual(expected, latencySamplesForTest(db));
 
-    var in_view_range = try scan_range_from_in_view(&view, testing.allocator, .{
+    var in_view_range = try scanRangeFromInView(&view, testing.allocator, .{
         .start = "a",
         .end = "z",
     }, null, 10);
     expected += 1;
-    try testing.expectEqual(expected, latency_samples_for_test(db));
+    try testing.expectEqual(expected, latencySamplesForTest(db));
 
     in_view_range.deinit();
     in_view_prefix.deinit();
     view.deinit();
 
-    try apply_checked_batch(db, .{
+    try applyCheckedBatch(db, .{
         .writes = &.{
             .{ .key = "gamma", .value = &value },
         },
@@ -1367,20 +1367,20 @@ test "engine boundary latency sampling records one sample per call including err
         },
     });
     expected += 1;
-    try testing.expectEqual(expected, latency_samples_for_test(db));
+    try testing.expectEqual(expected, latencySamplesForTest(db));
 
     try testing.expectError(error.KeyTooLarge, db.put("", &value));
     expected += 1;
-    try testing.expectEqual(expected, latency_samples_for_test(db));
+    try testing.expectEqual(expected, latencySamplesForTest(db));
 
-    try testing.expectError(error.KeyTooLarge, apply_checked_batch(db, .{
+    try testing.expectError(error.KeyTooLarge, applyCheckedBatch(db, .{
         .writes = &.{
             .{ .key = "", .value = &value },
         },
         .guards = &.{},
     }));
     expected += 1;
-    try testing.expectEqual(expected, latency_samples_for_test(db));
+    try testing.expectEqual(expected, latencySamplesForTest(db));
 }
 
 test "wal-only restart preserves committed batch semantics" {
@@ -1389,7 +1389,7 @@ test "wal-only restart preserves committed batch semantics" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-batch-restart.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "step7-batch-restart.wal");
     defer testing.allocator.free(wal_path);
 
     {
@@ -1402,7 +1402,7 @@ test "wal-only restart preserves committed batch semantics" {
         const one = types.Value{ .integer = 1 };
         const two = types.Value{ .integer = 2 };
         const three = types.Value{ .integer = 3 };
-        try db.apply_batch(&.{
+        try db.applyBatch(&.{
             .{ .key = "alpha", .value = &one },
             .{ .key = "beta", .value = &two },
             .{ .key = "alpha", .value = &three },
@@ -1430,7 +1430,7 @@ test "recovered expired ttl metadata remains invisible after wal-only restart" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-expired-restart.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "step7-expired-restart.wal");
     defer testing.allocator.free(wal_path);
 
     {
@@ -1442,7 +1442,7 @@ test "recovered expired ttl metadata remains invisible after wal-only restart" {
 
         const value = types.Value{ .integer = 7 };
         try db.put("alpha", &value);
-        try testing.expect(try db.expire_at("alpha", runtime_shard.unix_now() + 1));
+        try testing.expect(try db.expireAt("alpha", runtime_shard.unixNow() + 1));
     }
 
     std.Thread.sleep(1100 * std.time.ns_per_ms);
@@ -1456,7 +1456,7 @@ test "recovered expired ttl metadata remains invisible after wal-only restart" {
     try testing.expect((try reopened.get(testing.allocator, "alpha")) == null);
     try testing.expectEqual(@as(i64, -2), try reopened.ttl("alpha"));
 
-    var scan = try reopened.scan_prefix(testing.allocator, "alpha");
+    var scan = try reopened.scanPrefix(testing.allocator, "alpha");
     defer scan.deinit();
     try testing.expectEqual(@as(usize, 0), scan.entries.items.len);
 }
@@ -1467,7 +1467,7 @@ test "truncated batch tail does not become visible after wal-only reopen" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-truncated-batch.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "step7-truncated-batch.wal");
     defer testing.allocator.free(wal_path);
 
     {
@@ -1479,7 +1479,7 @@ test "truncated batch tail does not become visible after wal-only reopen" {
 
         const one = types.Value{ .integer = 1 };
         const two = types.Value{ .integer = 2 };
-        try db.apply_batch(&.{
+        try db.applyBatch(&.{
             .{ .key = "alpha", .value = &one },
             .{ .key = "beta", .value = &two },
         });
@@ -1544,8 +1544,8 @@ test "put overwrites existing plain value" {
     defer stored.deinit(testing.allocator);
 
     try testing.expectEqualStrings("updated", stored.string);
-    try testing.expectEqual(@as(u64, 2), db.state.stats_snapshot().ops_put_total);
-    try testing.expectEqual(@as(u64, 1), db.state.stats_snapshot().overwrites_total);
+    try testing.expectEqual(@as(u64, 2), db.state.statsSnapshot().ops_put_total);
+    try testing.expectEqual(@as(u64, 1), db.state.statsSnapshot().overwrites_total);
 }
 
 test "scalar point overwrites avoid allocator growth in steady state" {
@@ -1577,12 +1577,12 @@ test "put leaves state unchanged when wal append fails" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step6-put-failure.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step6-put-failure.wal");
     defer testing.allocator.free(path);
 
     const db = try create(testing.allocator);
     defer db.close() catch unreachable;
-    try attach_test_wal(db, path, .none);
+    try attachTestWal(db, path, .none);
 
     const value = types.Value{ .string = "value" };
     storage_wal.test_hooks.failNextWrite();
@@ -1600,7 +1600,7 @@ test "put_group writes all provided entries" {
     const two = types.Value{ .string = "two" };
     const three = types.Value{ .boolean = true };
 
-    try db.put_group(&.{
+    try db.putGroup(&.{
         .{ .key = "group:one", .value = &one },
         .{ .key = "group:two", .value = &two },
         .{ .key = "group:three", .value = &three },
@@ -1624,16 +1624,16 @@ test "put_group keeps state unchanged when wal append fails" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step6-put-group-failure.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step6-put-group-failure.wal");
     defer testing.allocator.free(path);
 
     const db = try create(testing.allocator);
     defer db.close() catch unreachable;
-    try attach_test_wal(db, path, .none);
+    try attachTestWal(db, path, .none);
 
     const value = types.Value{ .string = "value" };
     storage_wal.test_hooks.failNextWrite();
-    try testing.expectError(error.PersistenceIoFailure, db.put_group(&.{
+    try testing.expectError(error.PersistenceIoFailure, db.putGroup(&.{
         .{ .key = "wal:group:1", .value = &value },
         .{ .key = "wal:group:2", .value = &value },
     }));
@@ -1648,7 +1648,7 @@ test "delete returns a durability error and keeps the key when wal append fails"
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step6-delete-failure.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step6-delete-failure.wal");
     defer testing.allocator.free(path);
 
     const db = try create(testing.allocator);
@@ -1656,7 +1656,7 @@ test "delete returns a durability error and keeps the key when wal append fails"
 
     const value = types.Value{ .integer = 1 };
     try db.put("wal:delete", &value);
-    try attach_test_wal(db, path, .none);
+    try attachTestWal(db, path, .none);
 
     storage_wal.test_hooks.failNextWrite();
     try testing.expectError(error.PersistenceIoFailure, db.delete("wal:delete"));
@@ -1672,7 +1672,7 @@ test "expire_at returns false for missing keys and increments the expire counter
     const db = try create(testing.allocator);
     defer db.close() catch unreachable;
 
-    try testing.expect(!try db.expire_at("missing", runtime_shard.unix_now() + 30));
+    try testing.expect(!try db.expireAt("missing", runtime_shard.unixNow() + 30));
     try testing.expectEqual(@as(u64, 1), db.state.counters.ops_expire_total.load(.monotonic));
 }
 
@@ -1685,13 +1685,13 @@ test "expire_at null clears existing ttl while keeping the stored value" {
     const value = types.Value{ .string = "value" };
     try db.put("ttl:key", &value);
 
-    const expire_at_seconds = runtime_shard.unix_now() + 30;
-    try testing.expect(try db.expire_at("ttl:key", expire_at_seconds));
+    const expire_at_seconds = runtime_shard.unixNow() + 30;
+    try testing.expect(try db.expireAt("ttl:key", expire_at_seconds));
     const ttl_before_clear = try db.ttl("ttl:key");
     try testing.expect(ttl_before_clear >= 0);
     try testing.expect(ttl_before_clear <= 30);
 
-    try testing.expect(try db.expire_at("ttl:key", null));
+    try testing.expect(try db.expireAt("ttl:key", null));
     try testing.expectEqual(@as(i64, -1), try db.ttl("ttl:key"));
 
     var stored = (try db.get(testing.allocator, "ttl:key")).?;
@@ -1708,10 +1708,10 @@ test "expire_at at or before now deletes the key immediately" {
     const value = types.Value{ .integer = 9 };
     try db.put("gone", &value);
 
-    try testing.expect(try db.expire_at("gone", runtime_shard.unix_now()));
+    try testing.expect(try db.expireAt("gone", runtime_shard.unixNow()));
     try testing.expect((try db.get(testing.allocator, "gone")) == null);
     try testing.expectEqual(@as(i64, -2), try db.ttl("gone"));
-    try testing.expect(!has_ttl_for_test(db, "gone"));
+    try testing.expect(!hasTtlForTest(db, "gone"));
 }
 
 test "expire_at future leaves ttl unchanged when wal append fails" {
@@ -1720,7 +1720,7 @@ test "expire_at future leaves ttl unchanged when wal append fails" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step6-expire-future-failure.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step6-expire-future-failure.wal");
     defer testing.allocator.free(path);
 
     const db = try create(testing.allocator);
@@ -1728,12 +1728,12 @@ test "expire_at future leaves ttl unchanged when wal append fails" {
 
     const value = types.Value{ .integer = 1 };
     try db.put("wal:expire-future", &value);
-    try set_ttl_for_test(db, "wal:expire-future", runtime_shard.unix_now() + 30);
-    try attach_test_wal(db, path, .none);
+    try setTtlForTest(db, "wal:expire-future", runtime_shard.unixNow() + 30);
+    try attachTestWal(db, path, .none);
 
     storage_wal.test_hooks.failNextWrite();
-    try testing.expectError(error.PersistenceIoFailure, db.expire_at("wal:expire-future", runtime_shard.unix_now() + 90));
-    try testing.expect(has_ttl_for_test(db, "wal:expire-future"));
+    try testing.expectError(error.PersistenceIoFailure, db.expireAt("wal:expire-future", runtime_shard.unixNow() + 90));
+    try testing.expect(hasTtlForTest(db, "wal:expire-future"));
     try testing.expect((try db.ttl("wal:expire-future")) <= 30);
 }
 
@@ -1743,7 +1743,7 @@ test "expire_at immediate delete leaves key visible when wal append fails" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step6-expire-delete-failure.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step6-expire-delete-failure.wal");
     defer testing.allocator.free(path);
 
     const db = try create(testing.allocator);
@@ -1751,10 +1751,10 @@ test "expire_at immediate delete leaves key visible when wal append fails" {
 
     const value = types.Value{ .integer = 9 };
     try db.put("wal:expire-delete", &value);
-    try attach_test_wal(db, path, .none);
+    try attachTestWal(db, path, .none);
 
     storage_wal.test_hooks.failNextWrite();
-    try testing.expectError(error.PersistenceIoFailure, db.expire_at("wal:expire-delete", runtime_shard.unix_now()));
+    try testing.expectError(error.PersistenceIoFailure, db.expireAt("wal:expire-delete", runtime_shard.unixNow()));
 
     var stored = (try db.get(testing.allocator, "wal:expire-delete")).?;
     defer stored.deinit(testing.allocator);
@@ -1768,7 +1768,7 @@ test "expire_at null leaves ttl intact when wal append fails" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step6-expire-clear-failure.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step6-expire-clear-failure.wal");
     defer testing.allocator.free(path);
 
     const db = try create(testing.allocator);
@@ -1776,12 +1776,12 @@ test "expire_at null leaves ttl intact when wal append fails" {
 
     const value = types.Value{ .integer = 1 };
     try db.put("wal:expire-clear", &value);
-    try set_ttl_for_test(db, "wal:expire-clear", runtime_shard.unix_now() + 30);
-    try attach_test_wal(db, path, .none);
+    try setTtlForTest(db, "wal:expire-clear", runtime_shard.unixNow() + 30);
+    try attachTestWal(db, path, .none);
 
     storage_wal.test_hooks.failNextWrite();
-    try testing.expectError(error.PersistenceIoFailure, db.expire_at("wal:expire-clear", null));
-    try testing.expect(has_ttl_for_test(db, "wal:expire-clear"));
+    try testing.expectError(error.PersistenceIoFailure, db.expireAt("wal:expire-clear", null));
+    try testing.expect(hasTtlForTest(db, "wal:expire-clear"));
     try testing.expect((try db.ttl("wal:expire-clear")) >= 0);
 }
 
@@ -1793,14 +1793,14 @@ test "ttl eagerly cleans up expired keys while get remains lazily invisible" {
 
     const value = types.Value{ .string = "stale" };
     try db.put("stale:key", &value);
-    try set_ttl_for_test(db, "stale:key", runtime_shard.unix_now() - 1);
+    try setTtlForTest(db, "stale:key", runtime_shard.unixNow() - 1);
 
-    try testing.expect(has_ttl_for_test(db, "stale:key"));
+    try testing.expect(hasTtlForTest(db, "stale:key"));
     try testing.expect((try db.get(testing.allocator, "stale:key")) == null);
-    try testing.expect(has_ttl_for_test(db, "stale:key"));
+    try testing.expect(hasTtlForTest(db, "stale:key"));
 
     try testing.expectEqual(@as(i64, -2), try db.ttl("stale:key"));
-    try testing.expect(!has_ttl_for_test(db, "stale:key"));
+    try testing.expect(!hasTtlForTest(db, "stale:key"));
     try testing.expect((try db.get(testing.allocator, "stale:key")) == null);
 }
 
@@ -1810,14 +1810,14 @@ test "read view holds the visibility gate until released" {
     const db = try create(testing.allocator);
     defer db.close() catch unreachable;
 
-    var view = try db.read_view();
+    var view = try db.readView();
     defer if (view.token_id != 0) view.deinit();
 
-    try testing.expect(!try_lock_all_shard_visibility_gates_exclusive_for_test(db));
+    try testing.expect(!tryLockAllShardVisibilityGatesExclusiveForTest(db));
 
     view.deinit();
-    try testing.expect(try_lock_all_shard_visibility_gates_exclusive_for_test(db));
-    unlock_all_shard_visibility_gates_exclusive_for_test(db);
+    try testing.expect(tryLockAllShardVisibilityGatesExclusiveForTest(db));
+    unlockAllShardVisibilityGatesExclusiveForTest(db);
 }
 
 test "checkpoint returns busy while a read view holds global visibility gates" {
@@ -1826,7 +1826,7 @@ test "checkpoint returns busy while a read view holds global visibility gates" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "checkpoint-busy-read-view.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "checkpoint-busy-read-view.snapshot");
     defer testing.allocator.free(snapshot_path);
 
     const db = try open(testing.allocator, .{
@@ -1834,12 +1834,12 @@ test "checkpoint returns busy while a read view holds global visibility gates" {
     });
     defer db.close() catch unreachable;
 
-    var view = try db.read_view();
+    var view = try db.readView();
     defer view.deinit();
 
     try testing.expectError(error.CheckpointBusy, db.checkpoint());
 
-    const stats = db.state.stats_snapshot();
+    const stats = db.state.statsSnapshot();
     try testing.expectEqual(@as(u64, 1), stats.checkpoint_busy_total);
     try testing.expectEqual(@as(u64, 0), stats.checkpoint_count_total);
 }
@@ -1850,7 +1850,7 @@ test "compact memory returns busy while a read view holds global visibility gate
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "compact-memory-busy.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "compact-memory-busy.snapshot");
     defer testing.allocator.free(snapshot_path);
 
     const db = try open(testing.allocator, .{
@@ -1858,12 +1858,12 @@ test "compact memory returns busy while a read view holds global visibility gate
     });
     defer db.close() catch unreachable;
 
-    var view = try db.read_view();
+    var view = try db.readView();
     defer view.deinit();
 
-    try testing.expectError(error.CheckpointBusy, db.compact_memory());
+    try testing.expectError(error.CheckpointBusy, db.compactMemory());
 
-    const stats = db.state.stats_snapshot();
+    const stats = db.state.statsSnapshot();
     try testing.expectEqual(@as(u64, 1), stats.checkpoint_busy_total);
     try testing.expectEqual(@as(u64, 0), stats.checkpoint_count_total);
 }
@@ -1874,7 +1874,7 @@ test "checkpoint succeeds after read view release following busy result" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "checkpoint-busy-then-success.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "checkpoint-busy-then-success.snapshot");
     defer testing.allocator.free(snapshot_path);
 
     const db = try open(testing.allocator, .{
@@ -1883,14 +1883,14 @@ test "checkpoint succeeds after read view release following busy result" {
     defer db.close() catch unreachable;
 
     {
-        var view = try db.read_view();
+        var view = try db.readView();
         defer view.deinit();
 
         try testing.expectError(error.CheckpointBusy, db.checkpoint());
     }
 
     try db.checkpoint();
-    const stats = db.state.stats_snapshot();
+    const stats = db.state.statsSnapshot();
     try testing.expectEqual(@as(u64, 1), stats.checkpoint_busy_total);
     try testing.expectEqual(@as(u64, 1), stats.checkpoint_count_total);
 }
@@ -1901,7 +1901,7 @@ test "concurrent checkpoint attempts while read view held report busy" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "checkpoint-busy-concurrent.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "checkpoint-busy-concurrent.snapshot");
     defer testing.allocator.free(snapshot_path);
 
     const db = try open(testing.allocator, .{
@@ -1909,21 +1909,21 @@ test "concurrent checkpoint attempts while read view held report busy" {
     });
     defer db.close() catch unreachable;
 
-    var view = try db.read_view();
+    var view = try db.readView();
     defer view.deinit();
 
     var state_a = CheckpointThreadState{ .db = db };
     var state_b = CheckpointThreadState{ .db = db };
 
-    const thread_a = try std.Thread.spawn(.{}, run_checkpoint_in_thread, .{&state_a});
-    const thread_b = try std.Thread.spawn(.{}, run_checkpoint_in_thread, .{&state_b});
+    const thread_a = try std.Thread.spawn(.{}, runCheckpointInThread, .{&state_a});
+    const thread_b = try std.Thread.spawn(.{}, runCheckpointInThread, .{&state_b});
     thread_a.join();
     thread_b.join();
 
     try testing.expectEqual(@as(?EngineError, error.CheckpointBusy), state_a.checkpoint_error);
     try testing.expectEqual(@as(?EngineError, error.CheckpointBusy), state_b.checkpoint_error);
 
-    const stats = db.state.stats_snapshot();
+    const stats = db.state.statsSnapshot();
     try testing.expectEqual(@as(u64, 2), stats.checkpoint_busy_total);
     try testing.expectEqual(@as(u64, 0), stats.checkpoint_count_total);
 }
@@ -1934,19 +1934,19 @@ test "read view copies release the visibility gate only once" {
     const db = try create(testing.allocator);
     defer db.close() catch unreachable;
 
-    var view = try db.read_view();
+    var view = try db.readView();
     var copied = view;
     defer copied.deinit();
     defer view.deinit();
 
     try testing.expectEqual(@as(usize, 1), db.state.active_read_views.load(.monotonic));
-    try testing.expect(!try_lock_all_shard_visibility_gates_exclusive_for_test(db));
+    try testing.expect(!tryLockAllShardVisibilityGatesExclusiveForTest(db));
 
     view.deinit();
 
     try testing.expectEqual(@as(usize, 0), db.state.active_read_views.load(.monotonic));
-    try testing.expect(try_lock_all_shard_visibility_gates_exclusive_for_test(db));
-    unlock_all_shard_visibility_gates_exclusive_for_test(db);
+    try testing.expect(tryLockAllShardVisibilityGatesExclusiveForTest(db));
+    unlockAllShardVisibilityGatesExclusiveForTest(db);
 }
 
 test "in-view scans reject stale read view copies" {
@@ -1958,13 +1958,13 @@ test "in-view scans reject stale read view copies" {
     const value = types.Value{ .integer = 1 };
     try db.put("alpha", &value);
 
-    var view = try db.read_view();
+    var view = try db.readView();
     var copied = view;
     defer copied.deinit();
 
     view.deinit();
 
-    try testing.expectError(error.InvalidReadView, scan_prefix_from_in_view(&copied, testing.allocator, "alpha", null, 1));
+    try testing.expectError(error.InvalidReadView, scanPrefixFromInView(&copied, testing.allocator, "alpha", null, 1));
 }
 
 test "close fails while a read view is still active" {
@@ -1973,7 +1973,7 @@ test "close fails while a read view is still active" {
     const db = try create(testing.allocator);
     defer db.close() catch unreachable;
 
-    var view = try db.read_view();
+    var view = try db.readView();
     defer view.deinit();
 
     try testing.expectError(error.ActiveReadViews, db.close());
@@ -1985,7 +1985,7 @@ test "close surfaces final wal flush failure for batched async mode" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-close-fsync.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "step7-close-fsync.wal");
     defer testing.allocator.free(wal_path);
 
     const db = try open(testing.allocator, .{
@@ -2012,7 +2012,7 @@ test "apply_batch keeps the final value in declared key order" {
     const two = types.Value{ .integer = 2 };
     const three = types.Value{ .integer = 3 };
 
-    try db.apply_batch(&.{
+    try db.applyBatch(&.{
         .{ .key = "alpha", .value = &one },
         .{ .key = "beta", .value = &two },
         .{ .key = "alpha", .value = &three },
@@ -2033,17 +2033,17 @@ test "apply_batch leaves survivor writes unapplied when wal append fails" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step6-batch-failure.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step6-batch-failure.wal");
     defer testing.allocator.free(path);
 
     const db = try create(testing.allocator);
     defer db.close() catch unreachable;
-    try attach_test_wal(db, path, .none);
+    try attachTestWal(db, path, .none);
 
     const one = types.Value{ .integer = 1 };
     const two = types.Value{ .integer = 2 };
     storage_wal.test_hooks.failNextWrite();
-    try testing.expectError(error.PersistenceIoFailure, db.apply_batch(&.{
+    try testing.expectError(error.PersistenceIoFailure, db.applyBatch(&.{
         .{ .key = "wal:batch:one", .value = &one },
         .{ .key = "wal:batch:two", .value = &two },
     }));
@@ -2064,7 +2064,7 @@ test "apply_checked_batch keeps state unchanged when a guard fails" {
     const replacement = types.Value{ .string = "replacement" };
     const other = types.Value{ .integer = 9 };
 
-    try testing.expectError(error.GuardFailed, apply_checked_batch(db, .{
+    try testing.expectError(error.GuardFailed, applyCheckedBatch(db, .{
         .writes = &.{
             .{ .key = "guarded", .value = &replacement },
             .{ .key = "other", .value = &other },
@@ -2087,7 +2087,7 @@ test "apply_checked_batch leaves survivor writes unapplied when wal append fails
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step6-checked-batch-failure.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step6-checked-batch-failure.wal");
     defer testing.allocator.free(path);
 
     const db = try create(testing.allocator);
@@ -2095,11 +2095,11 @@ test "apply_checked_batch leaves survivor writes unapplied when wal append fails
 
     const existing = types.Value{ .integer = 1 };
     try db.put("wal:guard", &existing);
-    try attach_test_wal(db, path, .none);
+    try attachTestWal(db, path, .none);
 
     const target = types.Value{ .integer = 2 };
     storage_wal.test_hooks.failNextWrite();
-    try testing.expectError(error.PersistenceIoFailure, apply_checked_batch(db, .{
+    try testing.expectError(error.PersistenceIoFailure, applyCheckedBatch(db, .{
         .writes = &.{
             .{ .key = "wal:checked-target", .value = &target },
         },
@@ -2122,7 +2122,7 @@ test "apply_checked_batch validates guard keys and expected values" {
     const db = try create(testing.allocator);
     defer db.close() catch unreachable;
 
-    try testing.expectError(error.KeyTooLarge, apply_checked_batch(db, .{
+    try testing.expectError(error.KeyTooLarge, applyCheckedBatch(db, .{
         .writes = &.{},
         .guards = &.{
             .{ .key_exists = "" },
@@ -2134,7 +2134,7 @@ test "apply_checked_batch validates guard keys and expected values" {
     @memset(oversized_bytes, 'x');
     const oversized_value = types.Value{ .string = oversized_bytes };
 
-    try testing.expectError(error.ValueTooLarge, apply_checked_batch(db, .{
+    try testing.expectError(error.ValueTooLarge, applyCheckedBatch(db, .{
         .writes = &.{},
         .guards = &.{
             .{ .key_value_equals = .{
@@ -2153,16 +2153,16 @@ test "put and delete clear prior ttl metadata" {
 
     const first = types.Value{ .integer = 1 };
     try db.put("ttl:put", &first);
-    try set_ttl_for_test(db, "ttl:put", runtime_shard.unix_now() + 30);
+    try setTtlForTest(db, "ttl:put", runtime_shard.unixNow() + 30);
 
     const replacement = types.Value{ .integer = 2 };
     try db.put("ttl:put", &replacement);
     try testing.expectEqual(@as(i64, -1), try db.ttl("ttl:put"));
-    try testing.expect(!has_ttl_for_test(db, "ttl:put"));
+    try testing.expect(!hasTtlForTest(db, "ttl:put"));
 
-    try set_ttl_for_test(db, "ttl:put", runtime_shard.unix_now() + 30);
+    try setTtlForTest(db, "ttl:put", runtime_shard.unixNow() + 30);
     try testing.expect(try db.delete("ttl:put"));
-    try testing.expect(!has_ttl_for_test(db, "ttl:put"));
+    try testing.expect(!hasTtlForTest(db, "ttl:put"));
     try testing.expectEqual(@as(i64, -2), try db.ttl("ttl:put"));
 }
 
@@ -2174,11 +2174,11 @@ test "delete returns false for expired keys that are already invisible" {
 
     const value = types.Value{ .integer = 1 };
     try db.put("ttl:expired-delete", &value);
-    try set_ttl_for_test(db, "ttl:expired-delete", runtime_shard.unix_now() - 1);
+    try setTtlForTest(db, "ttl:expired-delete", runtime_shard.unixNow() - 1);
 
     try testing.expect(!try db.delete("ttl:expired-delete"));
     try testing.expect((try db.get(testing.allocator, "ttl:expired-delete")) == null);
-    try testing.expect(!has_ttl_for_test(db, "ttl:expired-delete"));
+    try testing.expect(!hasTtlForTest(db, "ttl:expired-delete"));
 }
 
 test "batch writes clear prior ttl metadata" {
@@ -2190,18 +2190,18 @@ test "batch writes clear prior ttl metadata" {
     const original = types.Value{ .integer = 1 };
     try db.put("ttl:batch", &original);
     try db.put("ttl:checked", &original);
-    try set_ttl_for_test(db, "ttl:batch", runtime_shard.unix_now() + 30);
-    try set_ttl_for_test(db, "ttl:checked", runtime_shard.unix_now() + 30);
+    try setTtlForTest(db, "ttl:batch", runtime_shard.unixNow() + 30);
+    try setTtlForTest(db, "ttl:checked", runtime_shard.unixNow() + 30);
 
     const batch_value = types.Value{ .integer = 2 };
-    try db.apply_batch(&.{
+    try db.applyBatch(&.{
         .{ .key = "ttl:batch", .value = &batch_value },
     });
     try testing.expectEqual(@as(i64, -1), try db.ttl("ttl:batch"));
-    try testing.expect(!has_ttl_for_test(db, "ttl:batch"));
+    try testing.expect(!hasTtlForTest(db, "ttl:batch"));
 
     const checked_value = types.Value{ .integer = 3 };
-    try apply_checked_batch(db, .{
+    try applyCheckedBatch(db, .{
         .writes = &.{
             .{ .key = "ttl:checked", .value = &checked_value },
         },
@@ -2210,7 +2210,7 @@ test "batch writes clear prior ttl metadata" {
         },
     });
     try testing.expectEqual(@as(i64, -1), try db.ttl("ttl:checked"));
-    try testing.expect(!has_ttl_for_test(db, "ttl:checked"));
+    try testing.expect(!hasTtlForTest(db, "ttl:checked"));
 }
 
 test "checked batch guards treat expired keys as absent" {
@@ -2221,10 +2221,10 @@ test "checked batch guards treat expired keys as absent" {
 
     const stale = types.Value{ .integer = 1 };
     try db.put("ttl:guarded", &stale);
-    try set_ttl_for_test(db, "ttl:guarded", runtime_shard.unix_now() - 1);
+    try setTtlForTest(db, "ttl:guarded", runtime_shard.unixNow() - 1);
 
     const fresh = types.Value{ .integer = 2 };
-    try apply_checked_batch(db, .{
+    try applyCheckedBatch(db, .{
         .writes = &.{
             .{ .key = "ttl:target", .value = &fresh },
         },
@@ -2237,7 +2237,7 @@ test "checked batch guards treat expired keys as absent" {
     defer target.deinit(testing.allocator);
     try testing.expectEqual(@as(i64, 2), target.integer);
 
-    try testing.expectError(error.GuardFailed, apply_checked_batch(db, .{
+    try testing.expectError(error.GuardFailed, applyCheckedBatch(db, .{
         .writes = &.{
             .{ .key = "ttl:another", .value = &fresh },
         },
@@ -2246,7 +2246,7 @@ test "checked batch guards treat expired keys as absent" {
         },
     }));
 
-    try testing.expectError(error.GuardFailed, apply_checked_batch(db, .{
+    try testing.expectError(error.GuardFailed, applyCheckedBatch(db, .{
         .writes = &.{
             .{ .key = "ttl:another", .value = &fresh },
         },
@@ -2271,7 +2271,7 @@ test "checked batch uses one expiration timestamp across all guards" {
 
     const original = types.Value{ .integer = 1 };
     try db.put(pathological_key, &original);
-    try testing.expect(try db.expire_at(pathological_key, runtime_shard.unix_now() + 2));
+    try testing.expect(try db.expireAt(pathological_key, runtime_shard.unixNow() + 2));
 
     const guards = try testing.allocator.alloc(types.CheckedBatchGuard, 128);
     defer testing.allocator.free(guards);
@@ -2280,7 +2280,7 @@ test "checked batch uses one expiration timestamp across all guards" {
     }
 
     const replacement = types.Value{ .integer = 2 };
-    try apply_checked_batch(db, .{
+    try applyCheckedBatch(db, .{
         .writes = &.{
             .{ .key = "ttl:guard-window", .value = &replacement },
         },
@@ -2305,7 +2305,7 @@ test "scan_prefix returns lexicographically ordered owned entries" {
     try db.put("alpha:1", &alpha_one);
     try db.put("beta", &beta);
 
-    var result = try db.scan_prefix(testing.allocator, "alpha");
+    var result = try db.scanPrefix(testing.allocator, "alpha");
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.entries.items.len);
@@ -2327,15 +2327,15 @@ test "scan operations omit expired keys while preserving lexicographic order" {
     try db.put("alpha", &a);
     try db.put("beta", &b);
     try db.put("gamma", &c);
-    try set_ttl_for_test(db, "beta", runtime_shard.unix_now() - 1);
+    try setTtlForTest(db, "beta", runtime_shard.unixNow() - 1);
 
-    var prefix_result = try db.scan_prefix(testing.allocator, "");
+    var prefix_result = try db.scanPrefix(testing.allocator, "");
     defer prefix_result.deinit();
     try testing.expectEqual(@as(usize, 2), prefix_result.entries.items.len);
     try testing.expectEqualStrings("alpha", prefix_result.entries.items[0].key);
     try testing.expectEqualStrings("gamma", prefix_result.entries.items[1].key);
 
-    var range_result = try db.scan_range(testing.allocator, .{
+    var range_result = try db.scanRange(testing.allocator, .{
         .start = "a",
         .end = "z",
     });
@@ -2358,7 +2358,7 @@ test "scan_range uses inclusive start and exclusive end" {
     try db.put("b", &b);
     try db.put("c", &c);
 
-    var result = try db.scan_range(testing.allocator, .{
+    var result = try db.scanRange(testing.allocator, .{
         .start = "a",
         .end = "c",
     });
@@ -2382,25 +2382,25 @@ test "scan_prefix_from_in_view paginates in key order" {
     try db.put("alpha:1", &two);
     try db.put("alpha:2", &three);
 
-    var view = try db.read_view();
+    var view = try db.readView();
     defer view.deinit();
 
-    var first_page = try scan_prefix_from_in_view(&view, testing.allocator, "alpha", null, 2);
+    var first_page = try scanPrefixFromInView(&view, testing.allocator, "alpha", null, 2);
     defer first_page.deinit();
 
     try testing.expectEqual(@as(usize, 2), first_page.entries.items.len);
-    try testing.expect(first_page.borrow_next_cursor() != null);
+    try testing.expect(first_page.borrowNextCursor() != null);
     try testing.expectEqualStrings("alpha", first_page.entries.items[0].key);
     try testing.expectEqualStrings("alpha:1", first_page.entries.items[1].key);
 
-    var cursor = first_page.take_next_cursor().?;
+    var cursor = first_page.takeNextCursor().?;
     defer cursor.deinit();
-    const cursor_view = cursor.as_cursor().?;
-    var second_page = try scan_prefix_from_in_view(&view, testing.allocator, "alpha", &cursor_view, 2);
+    const cursor_view = cursor.asCursor().?;
+    var second_page = try scanPrefixFromInView(&view, testing.allocator, "alpha", &cursor_view, 2);
     defer second_page.deinit();
 
     try testing.expectEqual(@as(usize, 1), second_page.entries.items.len);
-    try testing.expect(second_page.borrow_next_cursor() == null);
+    try testing.expect(second_page.borrowNextCursor() == null);
     try testing.expectEqualStrings("alpha:2", second_page.entries.items[0].key);
 }
 
@@ -2414,7 +2414,7 @@ test "scan_prefix_from_in_view merges cross-shard heads in global key order" {
 
     for (0..candidate_storage.len) |index| {
         const candidate = try std.fmt.bufPrint(&candidate_storage[index], "merge:{d:0>3}", .{index});
-        const shard_idx = runtime_shard.get_shard_index(candidate);
+        const shard_idx = runtime_shard.getShardIndex(candidate);
         if (seen_shards[shard_idx]) continue;
         seen_shards[shard_idx] = true;
         chosen[chosen_count] = candidate;
@@ -2434,26 +2434,26 @@ test "scan_prefix_from_in_view merges cross-shard heads in global key order" {
     try db.put(chosen[1], &two);
     try db.put(chosen[2], &three);
 
-    var view = try db.read_view();
+    var view = try db.readView();
     defer view.deinit();
 
-    var first_page = try scan_prefix_from_in_view(&view, testing.allocator, "merge:", null, 2);
+    var first_page = try scanPrefixFromInView(&view, testing.allocator, "merge:", null, 2);
     defer first_page.deinit();
 
     try testing.expectEqual(@as(usize, 2), first_page.entries.items.len);
     try testing.expectEqualStrings(chosen[0], first_page.entries.items[0].key);
     try testing.expectEqualStrings(chosen[1], first_page.entries.items[1].key);
-    try testing.expect(first_page.borrow_next_cursor() != null);
+    try testing.expect(first_page.borrowNextCursor() != null);
 
-    var cursor = first_page.take_next_cursor().?;
+    var cursor = first_page.takeNextCursor().?;
     defer cursor.deinit();
-    const cursor_view = cursor.as_cursor().?;
-    var second_page = try scan_prefix_from_in_view(&view, testing.allocator, "merge:", &cursor_view, 2);
+    const cursor_view = cursor.asCursor().?;
+    var second_page = try scanPrefixFromInView(&view, testing.allocator, "merge:", &cursor_view, 2);
     defer second_page.deinit();
 
     try testing.expectEqual(@as(usize, 1), second_page.entries.items.len);
     try testing.expectEqualStrings(chosen[2], second_page.entries.items[0].key);
-    try testing.expect(second_page.borrow_next_cursor() == null);
+    try testing.expect(second_page.borrowNextCursor() == null);
 }
 
 test "scan_prefix_from_in_view cursor records the last emitted key" {
@@ -2467,13 +2467,13 @@ test "scan_prefix_from_in_view cursor records the last emitted key" {
     try db.put("alpha", &one);
     try db.put("zz-after", &two);
 
-    var view = try db.read_view();
+    var view = try db.readView();
     defer view.deinit();
 
-    var page = try scan_prefix_from_in_view(&view, testing.allocator, "", null, 1);
+    var page = try scanPrefixFromInView(&view, testing.allocator, "", null, 1);
     defer page.deinit();
 
-    const cursor = page.borrow_next_cursor().?;
+    const cursor = page.borrowNextCursor().?;
     try testing.expectEqualStrings(page.entries.items[0].key, cursor.resume_key);
 }
 
@@ -2496,7 +2496,7 @@ test "scan_prefix matches and merges shard results in order" {
         try db.put(key, &value);
     }
 
-    var result = try db.scan_prefix(testing.allocator, "alpha");
+    var result = try db.scanPrefix(testing.allocator, "alpha");
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.entries.items.len);
@@ -2517,20 +2517,20 @@ test "scan_prefix_from_in_view omits keys expired before the view opens" {
     try db.put("alpha", &one);
     try db.put("alpha:1", &two);
     try db.put("alpha:2", &three);
-    try set_ttl_for_test(db, "alpha", runtime_shard.unix_now() - 1);
+    try setTtlForTest(db, "alpha", runtime_shard.unixNow() - 1);
 
-    var view = try db.read_view();
+    var view = try db.readView();
     defer view.deinit();
 
-    var first_page = try scan_prefix_from_in_view(&view, testing.allocator, "alpha", null, 1);
+    var first_page = try scanPrefixFromInView(&view, testing.allocator, "alpha", null, 1);
     defer first_page.deinit();
     try testing.expectEqual(@as(usize, 1), first_page.entries.items.len);
     try testing.expectEqualStrings("alpha:1", first_page.entries.items[0].key);
 
-    var cursor = first_page.take_next_cursor().?;
+    var cursor = first_page.takeNextCursor().?;
     defer cursor.deinit();
-    const cursor_view = cursor.as_cursor().?;
-    var second_page = try scan_prefix_from_in_view(&view, testing.allocator, "alpha", &cursor_view, 1);
+    const cursor_view = cursor.asCursor().?;
+    var second_page = try scanPrefixFromInView(&view, testing.allocator, "alpha", &cursor_view, 1);
     defer second_page.deinit();
     try testing.expectEqual(@as(usize, 1), second_page.entries.items.len);
     try testing.expectEqualStrings("alpha:2", second_page.entries.items[0].key);
@@ -2544,19 +2544,19 @@ test "read view freezes expiration time at open" {
 
     const value = types.Value{ .integer = 7 };
     try db.put("alpha", &value);
-    try testing.expect(try db.expire_at("alpha", runtime_shard.unix_now() + 1));
+    try testing.expect(try db.expireAt("alpha", runtime_shard.unixNow() + 1));
 
-    var view = try db.read_view();
+    var view = try db.readView();
     defer view.deinit();
 
     std.Thread.sleep(1100 * std.time.ns_per_ms);
 
-    var in_view = try scan_prefix_from_in_view(&view, testing.allocator, "alpha", null, 10);
+    var in_view = try scanPrefixFromInView(&view, testing.allocator, "alpha", null, 10);
     defer in_view.deinit();
     try testing.expectEqual(@as(usize, 1), in_view.entries.items.len);
     try testing.expectEqualStrings("alpha", in_view.entries.items[0].key);
 
-    var plain = try db.scan_prefix(testing.allocator, "alpha");
+    var plain = try db.scanPrefix(testing.allocator, "alpha");
     defer plain.deinit();
     try testing.expectEqual(@as(usize, 0), plain.entries.items.len);
 }
@@ -2569,23 +2569,23 @@ test "ttl does not deadlock under an active read view and defers cleanup" {
 
     const value = types.Value{ .integer = 7 };
     try db.put("ttl:view", &value);
-    try testing.expect(try db.expire_at("ttl:view", runtime_shard.unix_now() + 1));
+    try testing.expect(try db.expireAt("ttl:view", runtime_shard.unixNow() + 1));
 
-    var view = try db.read_view();
+    var view = try db.readView();
     defer view.deinit();
 
     std.Thread.sleep(1100 * std.time.ns_per_ms);
 
     try testing.expectEqual(@as(i64, -2), try db.ttl("ttl:view"));
-    try testing.expect(has_ttl_for_test(db, "ttl:view"));
+    try testing.expect(hasTtlForTest(db, "ttl:view"));
 
-    var in_view = try scan_prefix_from_in_view(&view, testing.allocator, "ttl:view", null, 10);
+    var in_view = try scanPrefixFromInView(&view, testing.allocator, "ttl:view", null, 10);
     defer in_view.deinit();
     try testing.expectEqual(@as(usize, 1), in_view.entries.items.len);
 
     view.deinit();
     try testing.expectEqual(@as(i64, -2), try db.ttl("ttl:view"));
-    try testing.expect(!has_ttl_for_test(db, "ttl:view"));
+    try testing.expect(!hasTtlForTest(db, "ttl:view"));
     try testing.expect((try db.get(testing.allocator, "ttl:view")) == null);
 }
 
@@ -2600,19 +2600,19 @@ test "scan page can promote one borrowed continuation cursor into owned storage"
     try db.put("alpha", &one);
     try db.put("alpha:1", &two);
 
-    var view = try db.read_view();
+    var view = try db.readView();
     defer view.deinit();
 
-    var page = try scan_prefix_from_in_view(&view, testing.allocator, "alpha", null, 1);
+    var page = try scanPrefixFromInView(&view, testing.allocator, "alpha", null, 1);
 
-    const borrowed_cursor = page.borrow_next_cursor().?;
+    const borrowed_cursor = page.borrowNextCursor().?;
     var owned_cursor = try borrowed_cursor.clone(testing.allocator);
     defer owned_cursor.deinit();
 
     page.deinit();
 
-    const cursor_view = owned_cursor.as_cursor().?;
-    var second_page = try scan_prefix_from_in_view(&view, testing.allocator, "alpha", &cursor_view, 1);
+    const cursor_view = owned_cursor.asCursor().?;
+    var second_page = try scanPrefixFromInView(&view, testing.allocator, "alpha", &cursor_view, 1);
     defer second_page.deinit();
 
     try testing.expectEqual(@as(usize, 1), second_page.entries.items.len);
@@ -2628,13 +2628,13 @@ test "owned scan cursor clone makes an independent continuation owner" {
     var cloned = (try cursor.clone(testing.allocator)).?;
     defer cloned.deinit();
 
-    try testing.expect(cursor.as_cursor() != null);
-    try testing.expect(cloned.as_cursor() != null);
+    try testing.expect(cursor.asCursor() != null);
+    try testing.expect(cloned.asCursor() != null);
 
     cursor.deinit();
 
-    try testing.expect(cloned.as_cursor() != null);
-    try testing.expectEqualStrings("alpha", cloned.as_cursor().?.resume_key);
+    try testing.expect(cloned.asCursor() != null);
+    try testing.expectEqualStrings("alpha", cloned.asCursor().?.resume_key);
 }
 
 test "point operation boundaries reject empty keys" {
@@ -2648,7 +2648,7 @@ test "point operation boundaries reject empty keys" {
     try testing.expectError(error.KeyTooLarge, db.put("", &value));
     try testing.expectError(error.KeyTooLarge, db.get(testing.allocator, ""));
     try testing.expectError(error.KeyTooLarge, db.delete(""));
-    try testing.expectError(error.KeyTooLarge, db.expire_at("", runtime_shard.unix_now() + 60));
+    try testing.expectError(error.KeyTooLarge, db.expireAt("", runtime_shard.unixNow() + 60));
     try testing.expectError(error.KeyTooLarge, db.ttl(""));
 }
 
@@ -2663,7 +2663,7 @@ test "apply_batch rejects invalid keys and oversized values before changing stat
     try db.put("sentinel", &sentinel);
 
     const replacement = types.Value{ .integer = 9 };
-    try testing.expectError(error.KeyTooLarge, db.apply_batch(&.{
+    try testing.expectError(error.KeyTooLarge, db.applyBatch(&.{
         .{ .key = "", .value = &replacement },
     }));
 
@@ -2672,7 +2672,7 @@ test "apply_batch rejects invalid keys and oversized values before changing stat
     @memset(oversized_bytes, 'x');
     const oversized_value = types.Value{ .string = oversized_bytes };
 
-    try testing.expectError(error.ValueTooLarge, db.apply_batch(&.{
+    try testing.expectError(error.ValueTooLarge, db.applyBatch(&.{
         .{ .key = "too:large", .value = &oversized_value },
     }));
 
@@ -2691,8 +2691,8 @@ test "empty batches are no-ops and checked empty batches still validate guards" 
     const value = types.Value{ .integer = 1 };
     try db.put("guarded", &value);
 
-    try db.apply_batch(&.{});
-    try testing.expectError(error.GuardFailed, apply_checked_batch(db, .{
+    try db.applyBatch(&.{});
+    try testing.expectError(error.GuardFailed, applyCheckedBatch(db, .{
         .writes = &.{},
         .guards = &.{
             .{ .key_not_exists = "guarded" },
@@ -2712,18 +2712,18 @@ test "shard reset reclaims committed batch arenas" {
 
     const one = types.Value{ .integer = 1 };
     const two = types.Value{ .integer = 2 };
-    try db.apply_batch(&.{
+    try db.applyBatch(&.{
         .{ .key = "arena:one", .value = &one },
         .{ .key = "arena:two", .value = &two },
     });
 
-    const shard_idx = runtime_shard.get_shard_index("arena:one");
+    const shard_idx = runtime_shard.getShardIndex("arena:one");
     const shard = &db.state.shards[shard_idx];
     shard.lock.lock();
     defer shard.lock.unlock();
 
     try testing.expect(shard.committed_arenas_head != null);
-    shard.reset_unlocked();
+    shard.resetUnlocked();
     try testing.expect(shard.committed_arenas_head == null);
     try testing.expect(shard.committed_arenas_tail == null);
     try testing.expect(shard.tree.lookup("arena:one") == null);
@@ -2749,8 +2749,8 @@ test "overwrite-only batches avoid retaining new committed arenas and remain rec
         };
     }
 
-    try db.apply_batch(&writes);
-    const committed_after_first = total_committed_arenas_for_test(db);
+    try db.applyBatch(&writes);
+    const committed_after_first = totalCommittedArenasForTest(db);
     try testing.expect(committed_after_first > 0);
     try testing.expect(committed_after_first <= writes.len);
 
@@ -2758,18 +2758,18 @@ test "overwrite-only batches avoid retaining new committed arenas and remain rec
         values[index] = .{ .integer = @intCast(index + 1_000) };
     }
 
-    try db.apply_batch(&writes);
-    try testing.expectEqual(committed_after_first, total_committed_arenas_for_test(db));
-    try testing.expect(value_is_heap_owned_for_test(db, "batch:0000"));
+    try db.applyBatch(&writes);
+    try testing.expectEqual(committed_after_first, totalCommittedArenasForTest(db));
+    try testing.expect(valueIsHeapOwnedForTest(db, "batch:0000"));
 
     const point_value = types.Value{ .integer = 9_999 };
     try db.put("batch:0000", &point_value);
-    try testing.expect(value_is_heap_owned_for_test(db, "batch:0000"));
+    try testing.expect(valueIsHeapOwnedForTest(db, "batch:0000"));
 
     const replacement = types.Value{ .integer = 8_888 };
     _ = try db.delete("batch:0000");
     try db.put("batch:0000", &replacement);
-    try testing.expect(!value_is_heap_owned_for_test(db, "batch:0000"));
+    try testing.expect(!valueIsHeapOwnedForTest(db, "batch:0000"));
 }
 
 test "scan_prefix includes the exact key and its subkeys" {
@@ -2787,7 +2787,7 @@ test "scan_prefix includes the exact key and its subkeys" {
     try db.put("alpha:2", &three);
     try db.put("alphabet", &four);
 
-    var result = try db.scan_prefix(testing.allocator, "alpha");
+    var result = try db.scanPrefix(testing.allocator, "alpha");
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 4), result.entries.items.len);
@@ -2810,10 +2810,10 @@ test "scan_range_from_in_view paginates binary keys in global order and terminat
     try db.put("\x00b", &two);
     try db.put("\x01a", &three);
 
-    var view = try db.read_view();
+    var view = try db.readView();
     defer view.deinit();
 
-    var first = try scan_range_from_in_view(&view, testing.allocator, .{
+    var first = try scanRangeFromInView(&view, testing.allocator, .{
         .start = "\x00a",
         .end = "\x02",
     }, null, 2);
@@ -2821,19 +2821,19 @@ test "scan_range_from_in_view paginates binary keys in global order and terminat
     try testing.expectEqual(@as(usize, 2), first.entries.items.len);
     try testing.expectEqualStrings("\x00a", first.entries.items[0].key);
     try testing.expectEqualStrings("\x00b", first.entries.items[1].key);
-    try testing.expect(first.borrow_next_cursor() != null);
+    try testing.expect(first.borrowNextCursor() != null);
 
-    var cursor = first.take_next_cursor().?;
+    var cursor = first.takeNextCursor().?;
     defer cursor.deinit();
-    const cursor_view = cursor.as_cursor().?;
-    var second = try scan_range_from_in_view(&view, testing.allocator, .{
+    const cursor_view = cursor.asCursor().?;
+    var second = try scanRangeFromInView(&view, testing.allocator, .{
         .start = "\x00a",
         .end = "\x02",
     }, &cursor_view, 2);
     defer second.deinit();
     try testing.expectEqual(@as(usize, 1), second.entries.items.len);
     try testing.expectEqualStrings("\x01a", second.entries.items[0].key);
-    try testing.expect(second.borrow_next_cursor() == null);
+    try testing.expect(second.borrowNextCursor() == null);
 }
 
 test "batch visibility-gate pause hook blocks completion until resumed" {
@@ -2852,7 +2852,7 @@ test "batch visibility-gate pause hook blocks completion until resumed" {
 
         fn run(state: *@This()) void {
             const next = types.Value{ .integer = 2 };
-            state.db.apply_batch(&.{
+            state.db.applyBatch(&.{
                 .{ .key = "alpha", .value = &next },
                 .{ .key = "beta", .value = &next },
             }) catch |err| {
@@ -2862,14 +2862,14 @@ test "batch visibility-gate pause hook blocks completion until resumed" {
         }
     };
 
-    batch_ops.test_hooks.pause_next_batch_after_visibility_gate();
+    batch_ops.test_hooks.pauseNextBatchAfterVisibilityGate();
 
     var batch_state = BatchThread{ .db = db };
     const batch_thread = try std.Thread.spawn(.{}, BatchThread.run, .{&batch_state});
     var pause_seen = false;
     var pause_attempts: usize = 0;
     while (pause_attempts < 5_000) : (pause_attempts += 1) {
-        if (batch_ops.test_hooks.is_batch_paused_after_visibility_gate()) {
+        if (batch_ops.test_hooks.isBatchPausedAfterVisibilityGate()) {
             pause_seen = true;
             break;
         }
@@ -2879,7 +2879,7 @@ test "batch visibility-gate pause hook blocks completion until resumed" {
     std.Thread.sleep(20 * std.time.ns_per_ms);
     try testing.expect(!batch_state.finished.load(.acquire));
 
-    batch_ops.test_hooks.resume_batch_after_visibility_gate();
+    batch_ops.test_hooks.resumeBatchAfterVisibilityGate();
     var completed = false;
     var completion_attempts: usize = 0;
     while (completion_attempts < 5_000) : (completion_attempts += 1) {
@@ -2945,7 +2945,7 @@ test "concurrent put and delete on one key leave the key in a well-formed state"
         db: *Database,
         err: ?EngineError = null,
 
-        fn run_put(state: *@This()) void {
+        fn runPut(state: *@This()) void {
             var index: usize = 0;
             while (index < 100) : (index += 1) {
                 const payload = types.Value{ .integer = 1 };
@@ -2956,7 +2956,7 @@ test "concurrent put and delete on one key leave the key in a well-formed state"
             }
         }
 
-        fn run_delete(state: *@This()) void {
+        fn runDelete(state: *@This()) void {
             var index: usize = 0;
             while (index < 100) : (index += 1) {
                 _ = state.db.delete("race:key") catch |err| {
@@ -2969,8 +2969,8 @@ test "concurrent put and delete on one key leave the key in a well-formed state"
 
     var putter = Mutator{ .db = db };
     var deleter = Mutator{ .db = db };
-    const put_thread = try std.Thread.spawn(.{}, Mutator.run_put, .{&putter});
-    const delete_thread = try std.Thread.spawn(.{}, Mutator.run_delete, .{&deleter});
+    const put_thread = try std.Thread.spawn(.{}, Mutator.runPut, .{&putter});
+    const delete_thread = try std.Thread.spawn(.{}, Mutator.runDelete, .{&deleter});
     put_thread.join();
     delete_thread.join();
 
@@ -2991,9 +2991,9 @@ test "snapshot floor at a batch commit skips already-checkpointed batch records 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "step12-batch-floor.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "step12-batch-floor.snapshot");
     defer testing.allocator.free(snapshot_path);
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "step12-batch-floor.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "step12-batch-floor.wal");
     defer testing.allocator.free(wal_path);
 
     {
@@ -3006,12 +3006,12 @@ test "snapshot floor at a batch commit skips already-checkpointed batch records 
 
         const one = types.Value{ .integer = 1 };
         const two = types.Value{ .integer = 2 };
-        try db.apply_batch(&.{
+        try db.applyBatch(&.{
             .{ .key = "batch:alpha", .value = &one },
             .{ .key = "batch:beta", .value = &two },
         });
 
-        const checkpoint_lsn = current_checkpoint_lsn_for_test(db);
+        const checkpoint_lsn = currentCheckpointLsnForTest(db);
         try testing.expectEqual(@as(u64, 4), checkpoint_lsn);
         _ = try storage_snapshot.write(&db.state, testing.allocator, snapshot_path, checkpoint_lsn);
     }
@@ -3038,9 +3038,9 @@ test "checkpointed restart keeps wal next_lsn monotonic for later writes" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "step12-next-lsn.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "step12-next-lsn.snapshot");
     defer testing.allocator.free(snapshot_path);
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "step12-next-lsn.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "step12-next-lsn.wal");
     defer testing.allocator.free(wal_path);
 
     {
@@ -3091,9 +3091,9 @@ test "max_wal_bytes triggers automatic checkpoint when threshold is exceeded" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "auto-wal-checkpoint.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "auto-wal-checkpoint.snapshot");
     defer testing.allocator.free(snapshot_path);
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "auto-wal-checkpoint.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "auto-wal-checkpoint.wal");
     defer testing.allocator.free(wal_path);
 
     // Threshold pequeno para que o primeiro put ja dispare o checkpoint.
@@ -3109,13 +3109,13 @@ test "max_wal_bytes triggers automatic checkpoint when threshold is exceeded" {
     try db.put("alpha", &value);
 
     // Apos o put, o auto-checkpoint deve ter rodado pelo menos uma vez.
-    const stats = db.state.stats_snapshot();
+    const stats = db.state.statsSnapshot();
     try testing.expect(stats.checkpoint_count_total >= 1);
 
     // O WAL deve ter sido compactado; bytes_pending cai abaixo do threshold original.
     if (db.state.wal) |wal| {
         // Apos checkpoint, o WAL e truncado. Pode ser 0 ou muito pequeno.
-        try testing.expect(wal.wal_bytes_pending() < 1024 * 1024);
+        try testing.expect(wal.walBytesPending() < 1024 * 1024);
     }
 }
 
@@ -3125,7 +3125,7 @@ test "max_wal_bytes without snapshot_path does not trigger checkpoint" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "auto-wal-no-snap.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "auto-wal-no-snap.wal");
     defer testing.allocator.free(wal_path);
 
     // max_wal_bytes configurado, mas snapshot_path ausente; auto-checkpoint nao deve armar.
@@ -3139,7 +3139,7 @@ test "max_wal_bytes without snapshot_path does not trigger checkpoint" {
     const value = types.Value{ .integer = 1 };
     try db.put("alpha", &value);
 
-    const stats = db.state.stats_snapshot();
+    const stats = db.state.statsSnapshot();
     try testing.expectEqual(@as(u64, 0), stats.checkpoint_count_total);
 }
 
@@ -3149,9 +3149,9 @@ test "max_wal_bytes null leaves checkpoint scheduling fully manual" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const snapshot_path = try alloc_tmp_path_test(testing.allocator, tmp, "auto-wal-null.snapshot");
+    const snapshot_path = try allocTmpPathTest(testing.allocator, tmp, "auto-wal-null.snapshot");
     defer testing.allocator.free(snapshot_path);
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "auto-wal-null.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "auto-wal-null.wal");
     defer testing.allocator.free(wal_path);
 
     const db = try open(testing.allocator, .{
@@ -3165,7 +3165,7 @@ test "max_wal_bytes null leaves checkpoint scheduling fully manual" {
     const value = types.Value{ .integer = 1 };
     for (0..100) |_| try db.put("alpha", &value);
 
-    const stats = db.state.stats_snapshot();
+    const stats = db.state.statsSnapshot();
     try testing.expectEqual(@as(u64, 0), stats.checkpoint_count_total);
 }
 
@@ -3180,21 +3180,21 @@ test "sweep_expired_entries_for_shard removes expired keys from art and ttl inde
     try db.put("sweep:beta", &value);
 
     // Set both keys as already expired.
-    try set_ttl_for_test(db, "sweep:alpha", runtime_shard.unix_now() - 10);
-    try set_ttl_for_test(db, "sweep:beta", runtime_shard.unix_now() - 10);
+    try setTtlForTest(db, "sweep:alpha", runtime_shard.unixNow() - 10);
+    try setTtlForTest(db, "sweep:beta", runtime_shard.unixNow() - 10);
 
-    const shard_idx_alpha = runtime_shard.get_shard_index("sweep:alpha");
-    const shard_idx_beta = runtime_shard.get_shard_index("sweep:beta");
+    const shard_idx_alpha = runtime_shard.getShardIndex("sweep:alpha");
+    const shard_idx_beta = runtime_shard.getShardIndex("sweep:beta");
 
-    expiration.sweep_expired_entries_for_shard(&db.state, shard_idx_alpha, testing.allocator);
-    expiration.sweep_expired_entries_for_shard(&db.state, shard_idx_beta, testing.allocator);
+    expiration.sweepExpiredEntriesForShard(&db.state, shard_idx_alpha, testing.allocator);
+    expiration.sweepExpiredEntriesForShard(&db.state, shard_idx_beta, testing.allocator);
 
     try testing.expect((try db.get(testing.allocator, "sweep:alpha")) == null);
     try testing.expect((try db.get(testing.allocator, "sweep:beta")) == null);
-    try testing.expect(!has_ttl_for_test(db, "sweep:alpha"));
-    try testing.expect(!has_ttl_for_test(db, "sweep:beta"));
-    try testing.expect(!has_stored_key_for_test(db, "sweep:alpha"));
-    try testing.expect(!has_stored_key_for_test(db, "sweep:beta"));
+    try testing.expect(!hasTtlForTest(db, "sweep:alpha"));
+    try testing.expect(!hasTtlForTest(db, "sweep:beta"));
+    try testing.expect(!hasStoredKeyForTest(db, "sweep:alpha"));
+    try testing.expect(!hasStoredKeyForTest(db, "sweep:beta"));
 }
 
 test "sweep_expired_entries_for_shard preserves non-expired keys" {
@@ -3205,13 +3205,13 @@ test "sweep_expired_entries_for_shard preserves non-expired keys" {
 
     const value = types.Value{ .integer = 7 };
     try db.put("sweep:live", &value);
-    try set_ttl_for_test(db, "sweep:live", runtime_shard.unix_now() + 60);
+    try setTtlForTest(db, "sweep:live", runtime_shard.unixNow() + 60);
 
-    const shard_idx = runtime_shard.get_shard_index("sweep:live");
-    expiration.sweep_expired_entries_for_shard(&db.state, shard_idx, testing.allocator);
+    const shard_idx = runtime_shard.getShardIndex("sweep:live");
+    expiration.sweepExpiredEntriesForShard(&db.state, shard_idx, testing.allocator);
 
-    try testing.expect(has_stored_key_for_test(db, "sweep:live"));
-    try testing.expect(has_ttl_for_test(db, "sweep:live"));
+    try testing.expect(hasStoredKeyForTest(db, "sweep:live"));
+    try testing.expect(hasTtlForTest(db, "sweep:live"));
 
     var stored = (try db.get(testing.allocator, "sweep:live")).?;
     defer stored.deinit(testing.allocator);
@@ -3228,12 +3228,12 @@ test "sweep_expired_entries_for_shard skips shards with no ttl entries" {
     try db.put("sweep:notttl", &value);
 
     // No TTL set, has_ttl_entries should be false for this shard
-    const shard_idx = runtime_shard.get_shard_index("sweep:notttl");
+    const shard_idx = runtime_shard.getShardIndex("sweep:notttl");
     try testing.expect(!db.state.shards[shard_idx].has_ttl_entries);
 
     // Should be a no-op — key must remain
-    expiration.sweep_expired_entries_for_shard(&db.state, shard_idx, testing.allocator);
-    try testing.expect(has_stored_key_for_test(db, "sweep:notttl"));
+    expiration.sweepExpiredEntriesForShard(&db.state, shard_idx, testing.allocator);
+    try testing.expect(hasStoredKeyForTest(db, "sweep:notttl"));
 }
 
 test "ttl_sweep_interval_ms starts background cleanup of expired keys" {
@@ -3246,13 +3246,13 @@ test "ttl_sweep_interval_ms starts background cleanup of expired keys" {
 
     const value = types.Value{ .integer = 3 };
     try db.put("sweep:bg", &value);
-    try set_ttl_for_test(db, "sweep:bg", runtime_shard.unix_now() - 1);
+    try setTtlForTest(db, "sweep:bg", runtime_shard.unixNow() - 1);
 
     // Wait for at least two sweep cycles
     std.Thread.sleep(80 * std.time.ns_per_ms);
 
-    try testing.expect(!has_stored_key_for_test(db, "sweep:bg"));
-    try testing.expect(!has_ttl_for_test(db, "sweep:bg"));
+    try testing.expect(!hasStoredKeyForTest(db, "sweep:bg"));
+    try testing.expect(!hasTtlForTest(db, "sweep:bg"));
 }
 
 test "ttl_sweep_interval_ms null leaves cleanup lazy only" {
@@ -3265,11 +3265,11 @@ test "ttl_sweep_interval_ms null leaves cleanup lazy only" {
 
     const value = types.Value{ .integer = 1 };
     try db.put("sweep:lazy", &value);
-    try set_ttl_for_test(db, "sweep:lazy", runtime_shard.unix_now() - 1);
+    try setTtlForTest(db, "sweep:lazy", runtime_shard.unixNow() - 1);
 
     // No background sweep; key should still be in ttl_index and ART
-    try testing.expect(has_ttl_for_test(db, "sweep:lazy"));
-    try testing.expect(has_stored_key_for_test(db, "sweep:lazy"));
+    try testing.expect(hasTtlForTest(db, "sweep:lazy"));
+    try testing.expect(hasStoredKeyForTest(db, "sweep:lazy"));
     // But invisible to get()
     try testing.expect((try db.get(testing.allocator, "sweep:lazy")) == null);
 }
@@ -3313,7 +3313,7 @@ test "exists returns false for an expired key" {
 
     const value = types.Value{ .integer = 1 };
     try db.put("exists:expired", &value);
-    try set_ttl_for_test(db, "exists:expired", runtime_shard.unix_now() - 1);
+    try setTtlForTest(db, "exists:expired", runtime_shard.unixNow() - 1);
 
     try testing.expect(!try db.exists("exists:expired"));
 }
@@ -3326,7 +3326,7 @@ test "exists returns true for a key with a future ttl" {
 
     const value = types.Value{ .integer = 1 };
     try db.put("exists:live", &value);
-    try set_ttl_for_test(db, "exists:live", runtime_shard.unix_now() + 60);
+    try setTtlForTest(db, "exists:live", runtime_shard.unixNow() + 60);
 
     try testing.expect(try db.exists("exists:live"));
 }
@@ -3362,9 +3362,9 @@ test "engine boundary latency sampling counts exists calls" {
     });
     defer db.close() catch unreachable;
 
-    const before = latency_samples_for_test(db);
+    const before = latencySamplesForTest(db);
     _ = try db.exists("latency:exists");
-    try testing.expectEqual(before + 1, latency_samples_for_test(db));
+    try testing.expectEqual(before + 1, latencySamplesForTest(db));
 }
 
 test "delete_prefix removes all matching keys and returns count" {
@@ -3379,7 +3379,7 @@ test "delete_prefix removes all matching keys and returns count" {
     try db.put("user:3", &v);
     try db.put("session:a", &v);
 
-    const deleted = try db.delete_prefix("user:");
+    const deleted = try db.deletePrefix("user:");
     try testing.expectEqual(@as(u64, 3), deleted);
 
     try testing.expect((try db.get(testing.allocator, "user:1")) == null);
@@ -3400,7 +3400,7 @@ test "delete_prefix returns zero when no keys match" {
     const v = types.Value{ .integer = 1 };
     try db.put("alpha:1", &v);
 
-    const deleted = try db.delete_prefix("beta:");
+    const deleted = try db.deletePrefix("beta:");
     try testing.expectEqual(@as(u64, 0), deleted);
 
     var alpha = (try db.get(testing.allocator, "alpha:1")).?;
@@ -3417,9 +3417,9 @@ test "delete_prefix skips expired keys" {
     const v = types.Value{ .integer = 1 };
     try db.put("ttl:live", &v);
     try db.put("ttl:dead", &v);
-    try set_ttl_for_test(db, "ttl:dead", runtime_shard.unix_now() - 1);
+    try setTtlForTest(db, "ttl:dead", runtime_shard.unixNow() - 1);
 
-    const deleted = try db.delete_prefix("ttl:");
+    const deleted = try db.deletePrefix("ttl:");
     try testing.expectEqual(@as(u64, 1), deleted);
     try testing.expect((try db.get(testing.allocator, "ttl:live")) == null);
     try testing.expect((try db.get(testing.allocator, "ttl:dead")) == null);
@@ -3440,7 +3440,7 @@ test "delete_prefix frees heap-owned values without leaking" {
     try db.put("heap:key", &first);
     try db.put("heap:key", &second);
 
-    const deleted = try db.delete_prefix("heap:");
+    const deleted = try db.deletePrefix("heap:");
     try testing.expectEqual(@as(u64, 1), deleted);
     try testing.expect((try db.get(testing.allocator, "heap:key")) == null);
 }
@@ -3451,7 +3451,7 @@ test "delete_prefix with wal records deletes and survives reopen" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const wal_path = try alloc_tmp_path_test(testing.allocator, tmp, "delete-prefix.wal");
+    const wal_path = try allocTmpPathTest(testing.allocator, tmp, "delete-prefix.wal");
     defer testing.allocator.free(wal_path);
 
     {
@@ -3466,7 +3466,7 @@ test "delete_prefix with wal records deletes and survives reopen" {
         try db.put("ns:two", &v);
         try db.put("keep:this", &v);
 
-        const deleted = try db.delete_prefix("ns:");
+        const deleted = try db.deletePrefix("ns:");
         try testing.expectEqual(@as(u64, 2), deleted);
     }
 
@@ -3490,7 +3490,7 @@ test "delete_prefix on empty database returns zero" {
     const db = try create(testing.allocator);
     defer db.close() catch unreachable;
 
-    const deleted = try db.delete_prefix("any:");
+    const deleted = try db.deletePrefix("any:");
     try testing.expectEqual(@as(u64, 0), deleted);
 }
 
@@ -3522,7 +3522,7 @@ test "get_many returns null for expired keys" {
 
     const value = types.Value{ .integer = 7 };
     try db.put("many:expired", &value);
-    try set_ttl_for_test(db, "many:expired", runtime_shard.unix_now() - 1);
+    try setTtlForTest(db, "many:expired", runtime_shard.unixNow() - 1);
 
     var result = try db.getMany(testing.allocator, &.{"many:expired"});
     defer result.deinit(testing.allocator);
@@ -3565,7 +3565,7 @@ test "get_many preserves index correspondence across shards" {
 
     for (0..candidate_storage.len) |i| {
         const candidate = try std.fmt.bufPrint(&candidate_storage[i], "many:shard:{d:0>3}", .{i});
-        const shard_idx = runtime_shard.get_shard_index(candidate);
+        const shard_idx = runtime_shard.getShardIndex(candidate);
         if (seen_shards[shard_idx]) continue;
         seen_shards[shard_idx] = true;
         chosen[chosen_count] = candidate;
@@ -3599,8 +3599,8 @@ test "get_many latency sampling records one sample per call" {
     });
     defer db.close() catch unreachable;
 
-    const before = latency_samples_for_test(db);
+    const before = latencySamplesForTest(db);
     var result = try db.getMany(testing.allocator, &.{ "a", "b", "c" });
     defer result.deinit(testing.allocator);
-    try testing.expectEqual(before + 1, latency_samples_for_test(db));
+    try testing.expectEqual(before + 1, latencySamplesForTest(db));
 }

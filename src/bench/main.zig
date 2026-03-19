@@ -43,7 +43,7 @@ const wal_group_keys = [_][]const u8{
     "bench:wal:15",
 };
 
-var bench_metrics_config: types.MetricsConfig = types.default_metrics_config();
+var bench_metrics_config: types.MetricsConfig = types.defaultMetricsConfig();
 var steady_put_db: ?*engine.Database = null;
 var steady_put_heavy_manual_db: ?*engine.Database = null;
 var steady_get_db: ?*engine.Database = null;
@@ -77,7 +77,7 @@ const BenchCliConfig = struct {
     scan_allocation_profile: bool = false,
     scan_candidate_profile: bool = false,
     heavy_overwrite_profile: bool = false,
-    metrics_config: types.MetricsConfig = types.default_metrics_config(),
+    metrics_config: types.MetricsConfig = types.defaultMetricsConfig(),
 };
 
 const default_sampled_latency_shift: u8 = 10;
@@ -114,7 +114,7 @@ const HeavyOverwriteProfile = struct {
     retained_heavy_bytes_estimate: u64,
 };
 
-fn open_bench_db(allocator: std.mem.Allocator) !*engine.Database {
+fn openBenchDb(allocator: std.mem.Allocator) !*engine.Database {
     return engine.open(allocator, .{
         .metrics = bench_metrics_config,
     });
@@ -122,7 +122,7 @@ fn open_bench_db(allocator: std.mem.Allocator) !*engine.Database {
 
 const PutFreshBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
-        const db = open_bench_db(allocator) catch unreachable;
+        const db = openBenchDb(allocator) catch unreachable;
         defer db.close() catch unreachable;
 
         const value = types.Value{ .integer = 1 };
@@ -187,8 +187,8 @@ const PutSteadyOverwriteHeavyManualCompactBenchmark = struct {
 
         const op_index = steady_put_overwrite_heavy_manual_ops.fetchAdd(1, .monotonic) + 1;
         if ((op_index % heavy_overwrite_manual_compact_interval) == 0) {
-            const shard_idx = internal.runtime_shard.get_shard_index(key);
-            db.compact_shard(shard_idx) catch unreachable;
+            const shard_idx = internal.runtime_shard.getShardIndex(key);
+            db.compactShard(shard_idx) catch unreachable;
         }
     }
 };
@@ -208,13 +208,13 @@ const PutGroupSteadyBenchmark = struct {
             writes[i] = .{ .key = key, .value = &values[i] };
         }
 
-        db.put_group(&writes) catch unreachable;
+        db.putGroup(&writes) catch unreachable;
     }
 };
 
 const GetExistingBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
-        const db = open_bench_db(allocator) catch unreachable;
+        const db = openBenchDb(allocator) catch unreachable;
         defer db.close() catch unreachable;
 
         const value = types.Value{ .integer = 42 };
@@ -265,12 +265,12 @@ const GetExistingSteadyTtlMixedBenchmark = struct {
 
 const ScanPrefixBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
-        const db = open_bench_db(allocator) catch unreachable;
+        const db = openBenchDb(allocator) catch unreachable;
         defer db.close() catch unreachable;
 
-        load_scan_fixture(scan_item_count, db);
+        loadScanFixture(scan_item_count, db);
 
-        var result = db.scan_prefix(allocator, "scan:") catch unreachable;
+        var result = db.scanPrefix(allocator, "scan:") catch unreachable;
         defer result.deinit();
         std.mem.doNotOptimizeAway(result.entries.items.len);
     }
@@ -279,7 +279,7 @@ const ScanPrefixBenchmark = struct {
 const ScanPrefixSteadyBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
         const db = steady_scan_db orelse unreachable;
-        var result = db.scan_prefix(allocator, "scan:") catch unreachable;
+        var result = db.scanPrefix(allocator, "scan:") catch unreachable;
         defer result.deinit();
         std.mem.doNotOptimizeAway(result.entries.items.len);
     }
@@ -288,7 +288,7 @@ const ScanPrefixSteadyBenchmark = struct {
 const ScanPrefixInViewSteadyBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
         const view = if (steady_scan_view) |*stored| stored else unreachable;
-        var page = official.scan_prefix_from_in_view(view, allocator, "scan:", null, scan_page_item_count) catch unreachable;
+        var page = official.scanPrefixFromInView(view, allocator, "scan:", null, scan_page_item_count) catch unreachable;
         defer page.deinit();
         std.mem.doNotOptimizeAway(page.entries.items.len);
     }
@@ -297,7 +297,7 @@ const ScanPrefixInViewSteadyBenchmark = struct {
 const ScanPrefixLargeSteadyBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
         const db = steady_scan_large_db orelse unreachable;
-        var result = db.scan_prefix(allocator, "scan:") catch unreachable;
+        var result = db.scanPrefix(allocator, "scan:") catch unreachable;
         defer result.deinit();
         std.mem.doNotOptimizeAway(result.entries.items.len);
     }
@@ -306,7 +306,7 @@ const ScanPrefixLargeSteadyBenchmark = struct {
 const ScanPrefixLargeInViewSteadyBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
         const view = if (steady_scan_large_view) |*stored| stored else unreachable;
-        var page = official.scan_prefix_from_in_view(view, allocator, "scan:", null, scan_page_item_count) catch unreachable;
+        var page = official.scanPrefixFromInView(view, allocator, "scan:", null, scan_page_item_count) catch unreachable;
         defer page.deinit();
         std.mem.doNotOptimizeAway(page.entries.items.len);
     }
@@ -314,16 +314,16 @@ const ScanPrefixLargeInViewSteadyBenchmark = struct {
 
 const ApplyBatchBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
-        const db = open_bench_db(allocator) catch unreachable;
+        const db = openBenchDb(allocator) catch unreachable;
         defer db.close() catch unreachable;
 
         var values: [batch_item_count]types.Value = undefined;
         var writes: [batch_item_count]types.PutWrite = undefined;
         var key_storage: [batch_item_count][batch_key_storage_bytes]u8 = undefined;
 
-        fill_batch_writes(&values, &writes, &key_storage, "batch", 0, 0);
+        fillBatchWrites(&values, &writes, &key_storage, "batch", 0, 0);
 
-        db.apply_batch(&writes) catch unreachable;
+        db.applyBatch(&writes) catch unreachable;
     }
 };
 
@@ -336,9 +336,9 @@ const ApplyBatchSteadyOverwriteBenchmark = struct {
         var writes: [batch_item_count]types.PutWrite = undefined;
         var key_storage: [batch_item_count][batch_key_storage_bytes]u8 = undefined;
 
-        fill_batch_writes(&values, &writes, &key_storage, "batch", 1_000, 0);
+        fillBatchWrites(&values, &writes, &key_storage, "batch", 1_000, 0);
 
-        db.apply_batch(&writes) catch unreachable;
+        db.applyBatch(&writes) catch unreachable;
     }
 };
 
@@ -352,24 +352,24 @@ const ApplyBatchSteadyInsertBenchmark = struct {
         var writes: [batch_item_count]types.PutWrite = undefined;
         var key_storage: [batch_item_count][batch_key_storage_bytes]u8 = undefined;
 
-        fill_batch_writes(&values, &writes, &key_storage, "batchi", 10_000, key_base);
+        fillBatchWrites(&values, &writes, &key_storage, "batchi", 10_000, key_base);
 
-        db.apply_batch(&writes) catch unreachable;
+        db.applyBatch(&writes) catch unreachable;
     }
 };
 
 const ApplyCheckedBatchBenchmark = struct {
     pub fn run(_: *const @This(), allocator: std.mem.Allocator) void {
-        const db = open_bench_db(allocator) catch unreachable;
+        const db = openBenchDb(allocator) catch unreachable;
         defer db.close() catch unreachable;
 
         var values: [batch_item_count]types.Value = undefined;
         var writes: [batch_item_count]types.PutWrite = undefined;
         var key_storage: [batch_item_count][batch_key_storage_bytes]u8 = undefined;
 
-        fill_batch_writes(&values, &writes, &key_storage, "guard", 0, 0);
+        fillBatchWrites(&values, &writes, &key_storage, "guard", 0, 0);
 
-        official.apply_checked_batch(db, .{
+        official.applyCheckedBatch(db, .{
             .writes = &writes,
             .guards = &.{},
         }) catch unreachable;
@@ -385,9 +385,9 @@ const ApplyCheckedBatchSteadyOverwriteBenchmark = struct {
         var writes: [batch_item_count]types.PutWrite = undefined;
         var key_storage: [batch_item_count][batch_key_storage_bytes]u8 = undefined;
 
-        fill_batch_writes(&values, &writes, &key_storage, "guard", 2_000, 0);
+        fillBatchWrites(&values, &writes, &key_storage, "guard", 2_000, 0);
 
-        official.apply_checked_batch(db, .{
+        official.applyCheckedBatch(db, .{
             .writes = &writes,
             .guards = &.{},
         }) catch unreachable;
@@ -404,9 +404,9 @@ const ApplyCheckedBatchSteadyInsertBenchmark = struct {
         var writes: [batch_item_count]types.PutWrite = undefined;
         var key_storage: [batch_item_count][batch_key_storage_bytes]u8 = undefined;
 
-        fill_batch_writes(&values, &writes, &key_storage, "guardi", 20_000, key_base);
+        fillBatchWrites(&values, &writes, &key_storage, "guardi", 20_000, key_base);
 
-        official.apply_checked_batch(db, .{
+        official.applyCheckedBatch(db, .{
             .writes = &writes,
             .guards = &.{},
         }) catch unreachable;
@@ -442,7 +442,7 @@ const WalAppendBenchmark = struct {
         _ = allocator;
         const wal = if (steady_wal) |*w| w else unreachable;
         const value = types.Value{ .integer = 42 };
-        wal.append_put("bench:wal", &value) catch unreachable;
+        wal.appendPut("bench:wal", &value) catch unreachable;
     }
 };
 
@@ -458,7 +458,7 @@ const WalAppendGroupedBenchmark = struct {
             writes[i] = .{ .key = wal_group_keys[i], .value = &value };
         }
 
-        wal.append_put_group(&writes) catch unreachable;
+        wal.appendPutGroup(&writes) catch unreachable;
     }
 };
 
@@ -469,14 +469,14 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     var stdout_buffer: [4 * 1024]u8 = undefined;
     var stdout = std.fs.File.stdout().writer(&stdout_buffer);
-    const cli_config = try parse_cli_config(allocator);
+    const cli_config = try parseCliConfig(allocator);
 
     if (cli_config.scan_allocation_profile) {
-        try run_scan_allocation_profile(&stdout.interface, cli_config.metrics_config);
+        try runScanAllocationProfile(&stdout.interface, cli_config.metrics_config);
     } else if (cli_config.scan_candidate_profile) {
-        try run_scan_candidate_profile(&stdout.interface, cli_config.metrics_config);
+        try runScanCandidateProfile(&stdout.interface, cli_config.metrics_config);
     } else if (cli_config.heavy_overwrite_profile) {
-        try run_heavy_overwrite_profile(&stdout.interface, cli_config.metrics_config);
+        try runHeavyOverwriteProfile(&stdout.interface, cli_config.metrics_config);
     } else if (cli_config.run_all_metrics_modes) {
         const configs = [_]types.MetricsConfig{
             .{ .mode = .disabled },
@@ -490,26 +490,26 @@ pub fn main() !void {
 
         for (configs, 0..) |config, index| {
             if (index != 0) try stdout.interface.print("\n", .{});
-            try run_bench_suite(allocator, &stdout.interface, config);
+            try runBenchSuite(allocator, &stdout.interface, config);
         }
     } else {
-        try run_bench_suite(allocator, &stdout.interface, cli_config.metrics_config);
-        try print_throughput_summary(allocator, &stdout.interface, cli_config.metrics_config);
-        try run_scaling_benchmarks(allocator, &stdout.interface);
-        try run_heavy_overwrite_profile(&stdout.interface, cli_config.metrics_config);
+        try runBenchSuite(allocator, &stdout.interface, cli_config.metrics_config);
+        try printThroughputSummary(allocator, &stdout.interface, cli_config.metrics_config);
+        try runScalingBenchmarks(allocator, &stdout.interface);
+        try runHeavyOverwriteProfile(&stdout.interface, cli_config.metrics_config);
     }
 
     try stdout.interface.flush();
 }
 
-fn print_throughput_summary(
+fn printThroughputSummary(
     allocator: std.mem.Allocator,
     writer: anytype,
     metrics_config: types.MetricsConfig,
 ) !void {
     bench_metrics_config = metrics_config;
-    try init_steady_state_benches();
-    defer deinit_steady_state_benches();
+    try initSteadyStateBenches();
+    defer deinitSteadyStateBenches();
 
     const warmup_iterations: usize = 2_000;
     const iterations: usize = 100_000;
@@ -523,7 +523,7 @@ fn print_throughput_summary(
     try writer.print("{s: <32} | {s: <33} | {s: <15}\n", .{ "Benchmark", "Latency (p50/p99/max)", "Throughput" });
     try writer.print("--------------------------------------------------------------------------------\n", .{});
 
-    try run_and_print_throughput(writer, "put steady", warmup_iterations, iterations, 1, struct {
+    try runAndPrintThroughput(writer, "put steady", warmup_iterations, iterations, 1, struct {
         fn run(_: std.mem.Allocator) void {
             const db = steady_put_db orelse unreachable;
             const key_index = steady_put_uniform_seed.fetchAdd(1, .monotonic) % put_steady_key_cardinality;
@@ -534,7 +534,7 @@ fn print_throughput_summary(
         }
     }.run, allocator);
 
-    try run_and_print_throughput(writer, "put overwrite64 steady", warmup_iterations, iterations, 1, struct {
+    try runAndPrintThroughput(writer, "put overwrite64 steady", warmup_iterations, iterations, 1, struct {
         fn run(_: std.mem.Allocator) void {
             const db = steady_put_db orelse unreachable;
             const key_index = steady_put_overwrite_seed.fetchAdd(1, .monotonic) % put_overwrite_key_cardinality;
@@ -546,7 +546,7 @@ fn print_throughput_summary(
         }
     }.run, allocator);
 
-    try run_and_print_throughput(writer, "put overwrite64 heavy1k steady", warmup_iterations, iterations, 1, struct {
+    try runAndPrintThroughput(writer, "put overwrite64 heavy1k steady", warmup_iterations, iterations, 1, struct {
         fn run(_: std.mem.Allocator) void {
             const db = steady_put_db orelse unreachable;
             const key_index = steady_put_overwrite_heavy_seed.fetchAdd(1, .monotonic) % put_overwrite_key_cardinality;
@@ -561,7 +561,7 @@ fn print_throughput_summary(
         }
     }.run, allocator);
 
-    try run_and_print_throughput(writer, "put overwrite64 heavy1k manual", warmup_iterations, iterations, 1, struct {
+    try runAndPrintThroughput(writer, "put overwrite64 heavy1k manual", warmup_iterations, iterations, 1, struct {
         fn run(_: std.mem.Allocator) void {
             const db = steady_put_heavy_manual_db orelse unreachable;
             const key_index = steady_put_overwrite_heavy_manual_seed.fetchAdd(1, .monotonic) % put_overwrite_key_cardinality;
@@ -576,13 +576,13 @@ fn print_throughput_summary(
 
             const op_index = steady_put_overwrite_heavy_manual_ops.fetchAdd(1, .monotonic) + 1;
             if ((op_index % heavy_overwrite_manual_compact_interval) == 0) {
-                const shard_idx = internal.runtime_shard.get_shard_index(key);
-                db.compact_shard(shard_idx) catch unreachable;
+                const shard_idx = internal.runtime_shard.getShardIndex(key);
+                db.compactShard(shard_idx) catch unreachable;
             }
         }
     }.run, allocator);
 
-    try run_and_print_throughput(writer, "put_group16 steady", warmup_iterations, iterations, put_group_item_count, struct {
+    try runAndPrintThroughput(writer, "put_group16 steady", warmup_iterations, iterations, put_group_item_count, struct {
         fn run(_: std.mem.Allocator) void {
             const db = steady_put_db orelse unreachable;
 
@@ -596,11 +596,11 @@ fn print_throughput_summary(
                 writes[i] = .{ .key = key, .value = &values[i] };
             }
 
-            db.put_group(&writes) catch unreachable;
+            db.putGroup(&writes) catch unreachable;
         }
     }.run, allocator);
 
-    try run_and_print_throughput(writer, "get steady", warmup_iterations, iterations, 1, struct {
+    try runAndPrintThroughput(writer, "get steady", warmup_iterations, iterations, 1, struct {
         fn run(alloc: std.mem.Allocator) void {
             const db = steady_get_db orelse unreachable;
             const key_index = steady_get_uniform_seed.fetchAdd(1, .monotonic) % get_steady_key_cardinality;
@@ -612,7 +612,7 @@ fn print_throughput_summary(
         }
     }.run, allocator);
 
-    try run_and_print_throughput(writer, "get steady ttl-mixed10", warmup_iterations, iterations, 1, struct {
+    try runAndPrintThroughput(writer, "get steady ttl-mixed10", warmup_iterations, iterations, 1, struct {
         fn run(alloc: std.mem.Allocator) void {
             const db = steady_get_ttl_mixed_db orelse unreachable;
             const key_idx = steady_get_ttl_mixed_seed.fetchAdd(1, .monotonic) % 10;
@@ -637,36 +637,36 @@ fn print_throughput_summary(
         }
     }.run, allocator);
 
-    try run_and_print_throughput(writer, "scan256 steady", warmup_iterations, 1000, 256, struct {
+    try runAndPrintThroughput(writer, "scan256 steady", warmup_iterations, 1000, 256, struct {
         fn run(alloc: std.mem.Allocator) void {
             const db = steady_scan_db orelse unreachable;
-            var result = db.scan_prefix(alloc, "scan:") catch unreachable;
+            var result = db.scanPrefix(alloc, "scan:") catch unreachable;
             defer result.deinit();
             std.mem.doNotOptimizeAway(result.entries.items.len);
         }
     }.run, allocator);
 
-    try run_and_print_throughput(writer, "scan4096 steady", warmup_iterations, 100, 4096, struct {
+    try runAndPrintThroughput(writer, "scan4096 steady", warmup_iterations, 100, 4096, struct {
         fn run(alloc: std.mem.Allocator) void {
             const db = steady_scan_large_db orelse unreachable;
-            var result = db.scan_prefix(alloc, "scan:") catch unreachable;
+            var result = db.scanPrefix(alloc, "scan:") catch unreachable;
             defer result.deinit();
             std.mem.doNotOptimizeAway(result.entries.items.len);
         }
     }.run, allocator);
 
-    try run_and_print_throughput(writer, "batch64 steady overwrite", warmup_iterations, 1000, 64, struct {
+    try runAndPrintThroughput(writer, "batch64 steady overwrite", warmup_iterations, 1000, 64, struct {
         fn run(_: std.mem.Allocator) void {
             const db = steady_batch_overwrite_db orelse unreachable;
             var values: [batch_item_count]types.Value = undefined;
             var writes: [batch_item_count]types.PutWrite = undefined;
             var key_storage: [batch_item_count][batch_key_storage_bytes]u8 = undefined;
-            fill_batch_writes(&values, &writes, &key_storage, "batch", 1_000, 0);
-            db.apply_batch(&writes) catch unreachable;
+            fillBatchWrites(&values, &writes, &key_storage, "batch", 1_000, 0);
+            db.applyBatch(&writes) catch unreachable;
         }
     }.run, allocator);
 
-    try run_and_print_throughput(writer, "art lookup", warmup_iterations, iterations, 1, struct {
+    try runAndPrintThroughput(writer, "art lookup", warmup_iterations, iterations, 1, struct {
         fn run(_: std.mem.Allocator) void {
             const tree = if (steady_art_tree) |*t| t else unreachable;
             const idx = art_lookup_seed.fetchAdd(1, .monotonic) % scan_item_count;
@@ -677,7 +677,7 @@ fn print_throughput_summary(
         }
     }.run, allocator);
 
-    try run_and_print_throughput(writer, "art insert", warmup_iterations, iterations, 1, struct {
+    try runAndPrintThroughput(writer, "art insert", warmup_iterations, iterations, 1, struct {
         fn run(_: std.mem.Allocator) void {
             const tree = if (steady_art_tree) |*t| t else unreachable;
             const idx = art_insert_seed.fetchAdd(1, .monotonic);
@@ -688,15 +688,15 @@ fn print_throughput_summary(
         }
     }.run, allocator);
 
-    try run_and_print_throughput(writer, "wal append", warmup_iterations, iterations, 1, struct {
+    try runAndPrintThroughput(writer, "wal append", warmup_iterations, iterations, 1, struct {
         fn run(_: std.mem.Allocator) void {
             const wal = if (steady_wal) |*w| w else unreachable;
             const value = types.Value{ .integer = 42 };
-            wal.append_put("bench:wal", &value) catch unreachable;
+            wal.appendPut("bench:wal", &value) catch unreachable;
         }
     }.run, allocator);
 
-    try run_and_print_throughput(writer, "wal append grouped16", warmup_iterations, iterations, wal_group_item_count, struct {
+    try runAndPrintThroughput(writer, "wal append grouped16", warmup_iterations, iterations, wal_group_item_count, struct {
         fn run(_: std.mem.Allocator) void {
             const wal = if (steady_wal) |*w| w else unreachable;
 
@@ -707,14 +707,14 @@ fn print_throughput_summary(
                 writes[i] = .{ .key = wal_group_keys[i], .value = &value };
             }
 
-            wal.append_put_group(&writes) catch unreachable;
+            wal.appendPutGroup(&writes) catch unreachable;
         }
     }.run, allocator);
 
     try writer.print("--------------------------------------------------------------------------------\n", .{});
 }
 
-fn run_and_print_throughput(
+fn runAndPrintThroughput(
     writer: anytype,
     label: []const u8,
     warmup_iterations: usize,
@@ -754,9 +754,9 @@ fn run_and_print_throughput(
     var max_buf: [24]u8 = undefined;
     var latency_summary_buf: [96]u8 = undefined;
 
-    const p50_text = try format_ns_short(&p50_buf, p50);
-    const p99_text = try format_ns_short(&p99_buf, p99);
-    const max_text = try format_ns_short(&max_buf, max);
+    const p50_text = try formatNsShort(&p50_buf, p50);
+    const p99_text = try formatNsShort(&p99_buf, p99);
+    const max_text = try formatNsShort(&max_buf, max);
     const latency_text = try std.fmt.bufPrint(&latency_summary_buf, "p50={s} p99={s} max={s}", .{ p50_text, p99_text, max_text });
 
     if (items_per_op > 1) {
@@ -797,7 +797,7 @@ const ScalingWorkerContext = struct {
     iterations: usize,
 };
 
-fn scaling_worker(ctx: ScalingWorkerContext) void {
+fn scalingWorker(ctx: ScalingWorkerContext) void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -842,7 +842,7 @@ fn scaling_worker(ctx: ScalingWorkerContext) void {
     }
 }
 
-fn allocate_distinct_shard_worker_keys(allocator: std.mem.Allocator, thread_count: usize) ![][]u8 {
+fn allocateDistinctShardWorkerKeys(allocator: std.mem.Allocator, thread_count: usize) ![][]u8 {
     var keys = try allocator.alloc([]u8, thread_count);
     var filled: usize = 0;
     errdefer {
@@ -856,7 +856,7 @@ fn allocate_distinct_shard_worker_keys(allocator: std.mem.Allocator, thread_coun
     for (0..thread_count) |worker_idx| {
         while (true) : (candidate += 1) {
             const key = try std.fmt.allocPrint(allocator, "worker:{{scale:{d}}}:key", .{candidate});
-            const shard_idx = internal.runtime_shard.get_shard_index(key);
+            const shard_idx = internal.runtime_shard.getShardIndex(key);
             if (used_shards.isSet(shard_idx)) {
                 allocator.free(key);
                 continue;
@@ -873,12 +873,12 @@ fn allocate_distinct_shard_worker_keys(allocator: std.mem.Allocator, thread_coun
     return keys;
 }
 
-fn free_worker_keys(allocator: std.mem.Allocator, keys: [][]u8) void {
+fn freeWorkerKeys(allocator: std.mem.Allocator, keys: [][]u8) void {
     for (keys) |key| allocator.free(key);
     allocator.free(keys);
 }
 
-fn run_scaling_for_contention(
+fn runScalingForContention(
     allocator: std.mem.Allocator,
     writer: anytype,
     op: ScalingBenchmarkType,
@@ -892,18 +892,18 @@ fn run_scaling_for_contention(
     var observed_throughput: f64 = 0;
 
     for (thread_counts) |t_count| {
-        const db = try open_bench_db(std.heap.page_allocator);
+        const db = try openBenchDb(std.heap.page_allocator);
         defer db.close() catch unreachable;
 
         var maybe_worker_keys: ?[][]u8 = null;
-        defer if (maybe_worker_keys) |keys| free_worker_keys(allocator, keys);
+        defer if (maybe_worker_keys) |keys| freeWorkerKeys(allocator, keys);
 
         var maybe_uniform_seeds: ?[]std.atomic.Value(usize) = null;
         defer if (maybe_uniform_seeds) |seeds| allocator.free(seeds);
 
         switch (contention) {
             .none => {
-                const worker_keys = try allocate_distinct_shard_worker_keys(allocator, t_count);
+                const worker_keys = try allocateDistinctShardWorkerKeys(allocator, t_count);
                 maybe_worker_keys = worker_keys;
 
                 for (0..t_count) |i| {
@@ -945,7 +945,7 @@ fn run_scaling_for_contention(
 
             const seed = if (contention == .uniform) &maybe_uniform_seeds.?[i] else null;
 
-            threads[i] = try std.Thread.spawn(.{}, scaling_worker, .{ScalingWorkerContext{
+            threads[i] = try std.Thread.spawn(.{}, scalingWorker, .{ScalingWorkerContext{
                 .db = db,
                 .op = op,
                 .contention = contention,
@@ -981,7 +981,7 @@ fn run_scaling_for_contention(
     return observed_throughput;
 }
 
-fn run_scaling_benchmarks(allocator: std.mem.Allocator, writer: anytype) !void {
+fn runScalingBenchmarks(allocator: std.mem.Allocator, writer: anytype) !void {
     try writer.print("\nSharded Scalability Benchmark\n", .{});
     try writer.print("note: 'none' = each thread on a distinct shard (best case). 'uniform' = 10k shared keys (realistic).\n", .{});
     try writer.print("--------------------------------------------------------------------------------\n", .{});
@@ -998,14 +998,14 @@ fn run_scaling_benchmarks(allocator: std.mem.Allocator, writer: anytype) !void {
             try writer.print("\n--- {s}: {s} ---\n", .{ op_name, mode_name });
             try writer.print("{s: <15} | {s: <10} | {s: <15} | {s: <10}\n", .{ "Workload", "Threads", "Throughput", "Scaling" });
             try writer.print("--------------------------------------------------------------------------------\n", .{});
-            _ = try run_scaling_for_contention(allocator, writer, op, contention, 0);
+            _ = try runScalingForContention(allocator, writer, op, contention, 0);
             try writer.print("--------------------------------------------------------------------------------\n", .{});
         }
         try writer.print("--------------------------------------------------------------------------------\n", .{});
     }
 }
 
-fn parse_cli_config(allocator: std.mem.Allocator) !BenchCliConfig {
+fn parseCliConfig(allocator: std.mem.Allocator) !BenchCliConfig {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
@@ -1015,7 +1015,7 @@ fn parse_cli_config(allocator: std.mem.Allocator) !BenchCliConfig {
 
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--help")) {
-            print_usage();
+            printUsage();
             std.process.exit(0);
         }
         if (std.mem.startsWith(u8, arg, "--metrics-mode=")) {
@@ -1025,7 +1025,7 @@ fn parse_cli_config(allocator: std.mem.Allocator) !BenchCliConfig {
                 saw_metrics_mode = true;
                 continue;
             }
-            cli.metrics_config.mode = parse_metrics_mode(value) orelse return error.InvalidArgument;
+            cli.metrics_config.mode = parseMetricsMode(value) orelse return error.InvalidArgument;
             saw_metrics_mode = true;
             continue;
         }
@@ -1057,7 +1057,7 @@ fn parse_cli_config(allocator: std.mem.Allocator) !BenchCliConfig {
     return cli;
 }
 
-fn parse_metrics_mode(raw: []const u8) ?types.MetricsMode {
+fn parseMetricsMode(raw: []const u8) ?types.MetricsMode {
     if (std.mem.eql(u8, raw, "disabled")) return .disabled;
     if (std.mem.eql(u8, raw, "counters_only")) return .counters_only;
     if (std.mem.eql(u8, raw, "sampled_latency")) return .sampled_latency;
@@ -1065,16 +1065,16 @@ fn parse_metrics_mode(raw: []const u8) ?types.MetricsMode {
     return null;
 }
 
-fn print_usage() void {
+fn printUsage() void {
     std.debug.print(
         \\usage: zeno-core-bench [--metrics-mode=disabled|counters_only|sampled_latency|full|all] [--latency-sample-shift=N] [--scan-allocation-profile] [--scan-candidate-profile] [--heavy-overwrite-profile]
         \\
     , .{});
 }
 
-fn run_heavy_overwrite_profile(writer: anytype, metrics_config: types.MetricsConfig) !void {
+fn runHeavyOverwriteProfile(writer: anytype, metrics_config: types.MetricsConfig) !void {
     bench_metrics_config = metrics_config;
-    try print_metrics_config(writer, metrics_config);
+    try printMetricsConfig(writer, metrics_config);
     try writer.print("heavy overwrite calibration (payload=1KB, keys=64, ops=50000)\n", .{});
     try writer.print(
         "{s: <15} | {s: <8} | {s: <8} | {s: <10} | {s: <14} | {s: <12}\n",
@@ -1084,26 +1084,26 @@ fn run_heavy_overwrite_profile(writer: anytype, metrics_config: types.MetricsCon
 
     const compact_intervals = [_]usize{ 100, 500, 1_000, 5_000, 10_000 };
     for (compact_intervals) |interval| {
-        const profile = try profile_heavy_overwrite_case(interval);
-        try print_heavy_overwrite_calibration_row(writer, interval, profile);
+        const profile = try profileHeavyOverwriteCase(interval);
+        try printHeavyOverwriteCalibrationRow(writer, interval, profile);
     }
 
-    const off = try profile_heavy_overwrite_case(null);
-    try print_heavy_overwrite_calibration_row(writer, null, off);
+    const off = try profileHeavyOverwriteCase(null);
+    try printHeavyOverwriteCalibrationRow(writer, null, off);
 }
 
-fn print_heavy_overwrite_calibration_row(writer: anytype, compact_every_n: ?usize, profile: HeavyOverwriteProfile) !void {
+fn printHeavyOverwriteCalibrationRow(writer: anytype, compact_every_n: ?usize, profile: HeavyOverwriteProfile) !void {
     var p50_buf: [24]u8 = undefined;
     var p99_buf: [24]u8 = undefined;
     var max_buf: [24]u8 = undefined;
     var retained_buf: [24]u8 = undefined;
     var elapsed_buf: [24]u8 = undefined;
 
-    const p50_text = format_ns_short(&p50_buf, profile.p50_ns) catch unreachable;
-    const p99_text = format_ns_short(&p99_buf, profile.p99_ns) catch unreachable;
-    const max_text = format_ns_short(&max_buf, profile.max_ns) catch unreachable;
-    const retained_text = format_bytes_short(&retained_buf, profile.retained_heavy_bytes_estimate) catch unreachable;
-    const elapsed_text = format_ns_short(&elapsed_buf, profile.elapsed_ns) catch unreachable;
+    const p50_text = formatNsShort(&p50_buf, profile.p50_ns) catch unreachable;
+    const p99_text = formatNsShort(&p99_buf, profile.p99_ns) catch unreachable;
+    const max_text = formatNsShort(&max_buf, profile.max_ns) catch unreachable;
+    const retained_text = formatBytesShort(&retained_buf, profile.retained_heavy_bytes_estimate) catch unreachable;
+    const elapsed_text = formatNsShort(&elapsed_buf, profile.elapsed_ns) catch unreachable;
 
     var mode_buf: [24]u8 = undefined;
     const mode_text = if (compact_every_n) |n|
@@ -1121,13 +1121,13 @@ fn print_heavy_overwrite_calibration_row(writer: anytype, compact_every_n: ?usiz
     });
 }
 
-fn format_ns_short(buf: []u8, ns: u64) ![]const u8 {
+fn formatNsShort(buf: []u8, ns: u64) ![]const u8 {
     if (ns < 1_000) return std.fmt.bufPrint(buf, "{d}ns", .{ns});
     if (ns < std.time.ns_per_ms) return std.fmt.bufPrint(buf, "{d:.2}us", .{@as(f64, @floatFromInt(ns)) / 1_000.0});
     return std.fmt.bufPrint(buf, "{d:.2}ms", .{@as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms))});
 }
 
-fn format_bytes_short(buf: []u8, bytes: u64) ![]const u8 {
+fn formatBytesShort(buf: []u8, bytes: u64) ![]const u8 {
     if (bytes >= 1024 * 1024) {
         return std.fmt.bufPrint(buf, "{d:.2}MB", .{@as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0)});
     }
@@ -1137,14 +1137,14 @@ fn format_bytes_short(buf: []u8, bytes: u64) ![]const u8 {
     return std.fmt.bufPrint(buf, "{d}B", .{bytes});
 }
 
-fn profile_heavy_overwrite_case(compact_every_n: ?usize) !HeavyOverwriteProfile {
+fn profileHeavyOverwriteCase(compact_every_n: ?usize) !HeavyOverwriteProfile {
     const iterations: usize = 50_000;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
-    const db = try open_bench_db(allocator);
+    const db = try openBenchDb(allocator);
     defer db.close() catch unreachable;
 
     var key_buf: [40]u8 = undefined;
@@ -1173,7 +1173,7 @@ fn profile_heavy_overwrite_case(compact_every_n: ?usize) !HeavyOverwriteProfile 
 
         if (compact_every_n) |interval| {
             if (((i + 1) % interval) == 0) {
-                try db.compact_all();
+                try db.compactAll();
             }
         }
     }
@@ -1184,7 +1184,7 @@ fn profile_heavy_overwrite_case(compact_every_n: ?usize) !HeavyOverwriteProfile 
     const p50_idx = (iterations * 50) / 100;
     const p99_idx = (iterations * 99) / 100;
     const max_idx = iterations - 1;
-    const stats = db.state.stats_snapshot();
+    const stats = db.state.statsSnapshot();
 
     return .{
         .elapsed_ns = elapsed_ns,
@@ -1196,40 +1196,40 @@ fn profile_heavy_overwrite_case(compact_every_n: ?usize) !HeavyOverwriteProfile 
     };
 }
 
-fn run_scan_allocation_profile(writer: anytype, metrics_config: types.MetricsConfig) !void {
+fn runScanAllocationProfile(writer: anytype, metrics_config: types.MetricsConfig) !void {
     bench_metrics_config = metrics_config;
-    try print_metrics_config(writer, metrics_config);
+    try printMetricsConfig(writer, metrics_config);
     try writer.print("scan allocation profile (prefix=\"scan:\", page_limit={d})\n", .{scan_page_item_count});
 
-    const scan256_full = try profile_scan_allocations(scan_item_count, .public_full);
-    try print_scan_allocation_profile(writer, "scan256 steady", scan256_full);
+    const scan256_full = try profileScanAllocations(scan_item_count, .public_full);
+    try printScanAllocationProfile(writer, "scan256 steady", scan256_full);
 
-    const scan256_in_view = try profile_scan_allocations(scan_item_count, .in_view_page);
-    try print_scan_allocation_profile(writer, "scan64 in-view steady", scan256_in_view);
+    const scan256_in_view = try profileScanAllocations(scan_item_count, .in_view_page);
+    try printScanAllocationProfile(writer, "scan64 in-view steady", scan256_in_view);
 
-    const scan4096_full = try profile_scan_allocations(scan_large_item_count, .public_full);
-    try print_scan_allocation_profile(writer, "scan4096 steady", scan4096_full);
+    const scan4096_full = try profileScanAllocations(scan_large_item_count, .public_full);
+    try printScanAllocationProfile(writer, "scan4096 steady", scan4096_full);
 
-    const scan4096_in_view = try profile_scan_allocations(scan_large_item_count, .in_view_page);
-    try print_scan_allocation_profile(writer, "scan64 in-view 4096 steady", scan4096_in_view);
+    const scan4096_in_view = try profileScanAllocations(scan_large_item_count, .in_view_page);
+    try printScanAllocationProfile(writer, "scan64 in-view 4096 steady", scan4096_in_view);
 }
 
-fn run_scan_candidate_profile(writer: anytype, metrics_config: types.MetricsConfig) !void {
+fn runScanCandidateProfile(writer: anytype, metrics_config: types.MetricsConfig) !void {
     bench_metrics_config = metrics_config;
-    try print_metrics_config(writer, metrics_config);
+    try printMetricsConfig(writer, metrics_config);
     try writer.print(
         "scan candidate profile (prefix=\"scan:\", page_limit={d})\n",
         .{scan_page_item_count},
     );
 
-    const scan256_full = try profile_public_full_scan(256);
-    try print_scan_candidate_profile(writer, "scan256 steady", scan256_full);
+    const scan256_full = try profilePublicFullScan(256);
+    try printScanCandidateProfile(writer, "scan256 steady", scan256_full);
 
-    const scan4096_full = try profile_public_full_scan(4096);
-    try print_scan_candidate_profile(writer, "scan4096 steady", scan4096_full);
+    const scan4096_full = try profilePublicFullScan(4096);
+    try printScanCandidateProfile(writer, "scan4096 steady", scan4096_full);
 }
 
-fn print_scan_allocation_profile(
+fn printScanAllocationProfile(
     writer: anytype,
     label: []const u8,
     profile: ScanAllocationProfile,
@@ -1248,7 +1248,7 @@ fn print_scan_allocation_profile(
     );
 }
 
-fn print_scan_candidate_profile(
+fn printScanCandidateProfile(
     writer: anytype,
     label: []const u8,
     profile: ScanCandidateProfile,
@@ -1266,16 +1266,16 @@ fn print_scan_candidate_profile(
     );
 }
 
-fn profile_scan_allocations(
+fn profileScanAllocations(
     comptime fixture_items: usize,
     mode: ScanProfileMode,
 ) !ScanAllocationProfile {
     var db_gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(db_gpa.deinit() == .ok);
 
-    const db = try open_bench_db(db_gpa.allocator());
+    const db = try openBenchDb(db_gpa.allocator());
     defer db.close() catch unreachable;
-    load_scan_fixture(fixture_items, db);
+    loadScanFixture(fixture_items, db);
 
     var result_gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(result_gpa.deinit() == .ok);
@@ -1288,17 +1288,17 @@ fn profile_scan_allocations(
 
     switch (mode) {
         .public_full => {
-            var result = try db.scan_prefix(counting_allocator, "scan:");
+            var result = try db.scanPrefix(counting_allocator, "scan:");
             emitted_entries = result.entries.items.len;
             result.deinit();
         },
         .in_view_page => {
-            var view = try db.read_view();
+            var view = try db.readView();
             defer view.deinit();
 
-            var page = try official.scan_prefix_from_in_view(&view, counting_allocator, "scan:", null, scan_page_item_count);
+            var page = try official.scanPrefixFromInView(&view, counting_allocator, "scan:", null, scan_page_item_count);
             emitted_entries = page.entries.items.len;
-            has_next_cursor = page.borrow_next_cursor() != null;
+            has_next_cursor = page.borrowNextCursor() != null;
             page.deinit();
         },
     }
@@ -1315,13 +1315,13 @@ fn profile_scan_allocations(
     };
 }
 
-fn profile_public_full_scan(comptime fixture_items: usize) !ScanCandidateProfile {
+fn profilePublicFullScan(comptime fixture_items: usize) !ScanCandidateProfile {
     var db_gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(db_gpa.deinit() == .ok);
 
-    const db = try open_bench_db(db_gpa.allocator());
+    const db = try openBenchDb(db_gpa.allocator());
     defer db.close() catch unreachable;
-    load_scan_fixture(fixture_items, db);
+    loadScanFixture(fixture_items, db);
 
     var result_gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(result_gpa.deinit() == .ok);
@@ -1330,7 +1330,7 @@ fn profile_public_full_scan(comptime fixture_items: usize) !ScanCandidateProfile
     const counting_allocator = counting_state.allocator();
 
     var timer = try std.time.Timer.start();
-    var result = try db.scan_prefix(counting_allocator, "scan:");
+    var result = try db.scanPrefix(counting_allocator, "scan:");
     const elapsed_ns = timer.read();
 
     const emitted_entries = result.entries.items.len;
@@ -1348,14 +1348,14 @@ fn profile_public_full_scan(comptime fixture_items: usize) !ScanCandidateProfile
     };
 }
 
-fn run_bench_suite(
+fn runBenchSuite(
     allocator: std.mem.Allocator,
     writer: anytype,
     metrics_config: types.MetricsConfig,
 ) !void {
     bench_metrics_config = metrics_config;
-    try init_steady_state_benches();
-    defer deinit_steady_state_benches();
+    try initSteadyStateBenches();
+    defer deinitSteadyStateBenches();
 
     var stable_bench = zbench.Benchmark.init(allocator, .{
         .max_iterations = 8_192,
@@ -1378,15 +1378,15 @@ fn run_bench_suite(
     const get_existing = GetExistingBenchmark{};
     const get_existing_steady = GetExistingSteadyBenchmark{};
     const get_existing_steady_ttl_mixed = GetExistingSteadyTtlMixedBenchmark{};
-    const scan_prefix = ScanPrefixBenchmark{};
+    const scanPrefix = ScanPrefixBenchmark{};
     const scan_prefix_steady = ScanPrefixSteadyBenchmark{};
     const scan_prefix_in_view_steady = ScanPrefixInViewSteadyBenchmark{};
     const scan_prefix_large_steady = ScanPrefixLargeSteadyBenchmark{};
     const scan_prefix_large_in_view_steady = ScanPrefixLargeInViewSteadyBenchmark{};
-    const apply_batch = ApplyBatchBenchmark{};
+    const applyBatch = ApplyBatchBenchmark{};
     const apply_batch_steady_overwrite = ApplyBatchSteadyOverwriteBenchmark{};
     const apply_batch_steady_insert = ApplyBatchSteadyInsertBenchmark{};
-    const apply_checked_batch = ApplyCheckedBatchBenchmark{};
+    const applyCheckedBatch = ApplyCheckedBatchBenchmark{};
     const apply_checked_batch_steady_overwrite = ApplyCheckedBatchSteadyOverwriteBenchmark{};
     const apply_checked_batch_steady_insert = ApplyCheckedBatchSteadyInsertBenchmark{};
 
@@ -1399,14 +1399,14 @@ fn run_bench_suite(
     try stable_bench.addParam("get isolated", &get_existing, .{});
     try stable_bench.addParam("get steady", &get_existing_steady, .{});
     try stable_bench.addParam("get steady ttl-mixed10", &get_existing_steady_ttl_mixed, .{});
-    try stable_bench.addParam("scan256 isolated", &scan_prefix, .{});
+    try stable_bench.addParam("scan256 isolated", &scanPrefix, .{});
     try stable_bench.addParam("scan256 steady", &scan_prefix_steady, .{});
     try stable_bench.addParam("scan64 in-view steady", &scan_prefix_in_view_steady, .{});
     try stable_bench.addParam("scan4096 steady", &scan_prefix_large_steady, .{});
     try stable_bench.addParam("scan64 in-view 4096 steady", &scan_prefix_large_in_view_steady, .{});
-    try stable_bench.addParam("batch64 isolated", &apply_batch, .{});
+    try stable_bench.addParam("batch64 isolated", &applyBatch, .{});
     try stable_bench.addParam("batch64 steady overwrite", &apply_batch_steady_overwrite, .{});
-    try stable_bench.addParam("checked64 isolated", &apply_checked_batch, .{});
+    try stable_bench.addParam("checked64 isolated", &applyCheckedBatch, .{});
     try stable_bench.addParam("checked64 steady overwrite", &apply_checked_batch_steady_overwrite, .{});
 
     try growing_bench.addParam("batch64 growing insert", &apply_batch_steady_insert, .{});
@@ -1417,14 +1417,14 @@ fn run_bench_suite(
     try stable_bench.addParam("wal append", &WalAppendBenchmark{}, .{});
     try stable_bench.addParam("wal append grouped16", &WalAppendGroupedBenchmark{}, .{});
 
-    try print_metrics_config(writer, metrics_config);
+    try printMetricsConfig(writer, metrics_config);
     try stable_bench.run(writer);
     try writer.print("\n", .{});
     try writer.print("growing workloads\n", .{});
     try growing_bench.run(writer);
 }
 
-fn print_metrics_config(writer: anytype, metrics_config: types.MetricsConfig) !void {
+fn printMetricsConfig(writer: anytype, metrics_config: types.MetricsConfig) !void {
     switch (metrics_config.mode) {
         .sampled_latency => {
             try writer.print(
@@ -1438,7 +1438,7 @@ fn print_metrics_config(writer: anytype, metrics_config: types.MetricsConfig) !v
     }
 }
 
-fn load_scan_fixture(comptime count: usize, db: *engine.Database) void {
+fn loadScanFixture(comptime count: usize, db: *engine.Database) void {
     var key_storage: [count][16]u8 = undefined;
     for (0..count) |index| {
         const key = std.fmt.bufPrint(&key_storage[index], "scan:{d:0>4}", .{index}) catch unreachable;
@@ -1447,8 +1447,8 @@ fn load_scan_fixture(comptime count: usize, db: *engine.Database) void {
     }
 }
 
-fn init_steady_state_benches() !void {
-    steady_put_db = try open_bench_db(std.heap.page_allocator);
+fn initSteadyStateBenches() !void {
+    steady_put_db = try openBenchDb(std.heap.page_allocator);
     {
         const value = types.Value{ .integer = 1 };
         try steady_put_db.?.put("bench:put", &value);
@@ -1479,7 +1479,7 @@ fn init_steady_state_benches() !void {
         steady_put_overwrite_heavy_seed.store(0, .monotonic);
     }
 
-    steady_get_db = try open_bench_db(std.heap.page_allocator);
+    steady_get_db = try openBenchDb(std.heap.page_allocator);
     {
         var key_buf: [32]u8 = undefined;
         for (0..get_steady_key_cardinality) |i| {
@@ -1490,7 +1490,7 @@ fn init_steady_state_benches() !void {
         steady_get_uniform_seed.store(0, .monotonic);
     }
 
-    steady_get_ttl_mixed_db = try open_bench_db(std.heap.page_allocator);
+    steady_get_ttl_mixed_db = try openBenchDb(std.heap.page_allocator);
     {
         var key_buf: [32]u8 = undefined;
         for (0..10) |i| {
@@ -1498,31 +1498,31 @@ fn init_steady_state_benches() !void {
             const value = types.Value{ .integer = @intCast(i) };
             try steady_get_ttl_mixed_db.?.put(key, &value);
         }
-        _ = try steady_get_ttl_mixed_db.?.expire_at("bench:get:ttl-mixed:0", internal.runtime_shard.unix_now() + 3600);
+        _ = try steady_get_ttl_mixed_db.?.expireAt("bench:get:ttl-mixed:0", internal.runtime_shard.unixNow() + 3600);
         steady_get_ttl_mixed_seed.store(0, .monotonic);
     }
 
-    steady_scan_db = try open_bench_db(std.heap.page_allocator);
-    load_scan_fixture(scan_item_count, steady_scan_db.?);
-    steady_scan_view = try steady_scan_db.?.read_view();
+    steady_scan_db = try openBenchDb(std.heap.page_allocator);
+    loadScanFixture(scan_item_count, steady_scan_db.?);
+    steady_scan_view = try steady_scan_db.?.readView();
 
-    steady_scan_large_db = try open_bench_db(std.heap.page_allocator);
-    load_scan_fixture(scan_large_item_count, steady_scan_large_db.?);
-    steady_scan_large_view = try steady_scan_large_db.?.read_view();
+    steady_scan_large_db = try openBenchDb(std.heap.page_allocator);
+    loadScanFixture(scan_large_item_count, steady_scan_large_db.?);
+    steady_scan_large_view = try steady_scan_large_db.?.readView();
 
-    steady_batch_overwrite_db = try open_bench_db(std.heap.page_allocator);
-    prime_batch_fixture(steady_batch_overwrite_db.?, "batch");
+    steady_batch_overwrite_db = try openBenchDb(std.heap.page_allocator);
+    primeBatchFixture(steady_batch_overwrite_db.?, "batch");
 
-    steady_batch_insert_db = try open_bench_db(std.heap.page_allocator);
+    steady_batch_insert_db = try openBenchDb(std.heap.page_allocator);
     steady_batch_insert_seed.store(0, .monotonic);
 
-    steady_checked_batch_overwrite_db = try open_bench_db(std.heap.page_allocator);
-    prime_batch_fixture(steady_checked_batch_overwrite_db.?, "guard");
+    steady_checked_batch_overwrite_db = try openBenchDb(std.heap.page_allocator);
+    primeBatchFixture(steady_checked_batch_overwrite_db.?, "guard");
 
-    steady_checked_batch_insert_db = try open_bench_db(std.heap.page_allocator);
+    steady_checked_batch_insert_db = try openBenchDb(std.heap.page_allocator);
     steady_checked_batch_insert_seed.store(0, .monotonic);
 
-    steady_put_heavy_manual_db = try open_bench_db(std.heap.page_allocator);
+    steady_put_heavy_manual_db = try openBenchDb(std.heap.page_allocator);
     {
         var key_buf: [40]u8 = undefined;
         var heavy_payload: [heavy_overwrite_payload_bytes]u8 = undefined;
@@ -1537,7 +1537,7 @@ fn init_steady_state_benches() !void {
     }
 
     steady_art_tree = internal.art.Tree.init(std.heap.page_allocator);
-    load_scan_fixture_to_art(scan_item_count, &steady_art_tree.?);
+    loadScanFixtureToArt(scan_item_count, &steady_art_tree.?);
 
     wal_bench_path = try std.fmt.allocPrint(std.heap.page_allocator, "/tmp/zeno-bench-{d}.wal", .{std.time.timestamp()});
     steady_wal = try internal.wal.Wal.open(wal_bench_path.?, .{ .fsync_mode = .batched_async }, .{
@@ -1554,7 +1554,7 @@ fn init_steady_state_benches() !void {
     }, std.heap.page_allocator);
 }
 
-fn load_scan_fixture_to_art(comptime count: usize, tree: *internal.art.Tree) void {
+fn loadScanFixtureToArt(comptime count: usize, tree: *internal.art.Tree) void {
     // We need to keep the values alive if they are heap-cloned, but here we use stack integer values
     // In ART, we store pointers to Value.
     // For benchmark stability, we'll pre-allocate a pool of values.
@@ -1566,7 +1566,7 @@ fn load_scan_fixture_to_art(comptime count: usize, tree: *internal.art.Tree) voi
     }
 }
 
-fn deinit_steady_state_benches() void {
+fn deinitSteadyStateBenches() void {
     steady_put_uniform_seed.store(0, .monotonic);
     steady_get_uniform_seed.store(0, .monotonic);
     art_lookup_seed.store(0, .monotonic);
@@ -1630,7 +1630,7 @@ fn deinit_steady_state_benches() void {
     }
 }
 
-fn prime_batch_fixture(db: *engine.Database, prefix: []const u8) void {
+fn primeBatchFixture(db: *engine.Database, prefix: []const u8) void {
     var key_storage: [batch_item_count][batch_key_storage_bytes]u8 = undefined;
     for (0..batch_item_count) |index| {
         const key = std.fmt.bufPrint(&key_storage[index], "{s}:{d:0>8}", .{ prefix, index }) catch unreachable;
@@ -1639,7 +1639,7 @@ fn prime_batch_fixture(db: *engine.Database, prefix: []const u8) void {
     }
 }
 
-fn fill_batch_writes(
+fn fillBatchWrites(
     values: *[batch_item_count]types.Value,
     writes: *[batch_item_count]types.PutWrite,
     key_storage: *[batch_item_count][batch_key_storage_bytes]u8,

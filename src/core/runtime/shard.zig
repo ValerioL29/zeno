@@ -15,7 +15,7 @@ pub const NUM_SHARDS: usize = 256;
 /// Time Complexity: O(n), where `n` is `key.len`.
 ///
 /// Allocator: Does not allocate.
-pub fn extract_hash_tag(key: []const u8) ?[]const u8 {
+pub fn extractHashTag(key: []const u8) ?[]const u8 {
     var tag_start: ?usize = null;
     for (key, 0..) |byte, index| {
         switch (byte) {
@@ -37,8 +37,8 @@ pub fn extract_hash_tag(key: []const u8) ?[]const u8 {
 /// Time Complexity: O(n), where `n` is `key.len`, including hash-tag extraction and hashing.
 ///
 /// Allocator: Does not allocate.
-pub fn get_shard_index(key: []const u8) usize {
-    const hash_bytes = extract_hash_tag(key) orelse key;
+pub fn getShardIndex(key: []const u8) usize {
+    const hash_bytes = extractHashTag(key) orelse key;
     const hash = std.hash.Wyhash.hash(0, hash_bytes);
     return @as(usize, @intCast(hash & (NUM_SHARDS - 1)));
 }
@@ -48,7 +48,7 @@ pub fn get_shard_index(key: []const u8) usize {
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-pub fn unix_now() i64 {
+pub fn unixNow() i64 {
     return std.time.timestamp();
 }
 
@@ -78,7 +78,7 @@ pub const Shard = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Not thread-safe; caller must already have exclusive access to the shard.
-    pub fn rebind_tree_allocator(self: *Shard) void {
+    pub fn rebindTreeAllocator(self: *Shard) void {
         self.tree.allocator = self.arena.allocator();
     }
 
@@ -109,7 +109,7 @@ pub const Shard = struct {
     /// Time Complexity: O(1).
     ///
     /// Thread Safety: Not thread-safe; caller must already hold exclusive shard ownership.
-    pub fn append_committed_arena(self: *Shard, committed: *CommittedArena) void {
+    pub fn appendCommittedArena(self: *Shard, committed: *CommittedArena) void {
         committed.next = null;
         if (self.committed_arenas_tail) |tail| {
             tail.next = committed;
@@ -119,7 +119,7 @@ pub const Shard = struct {
         self.committed_arenas_tail = committed;
     }
 
-    fn release_committed_arenas(self: *Shard) void {
+    fn releaseCommittedArenas(self: *Shard) void {
         var current = self.committed_arenas_head;
         while (current) |node| {
             const next = node.next;
@@ -131,13 +131,13 @@ pub const Shard = struct {
         self.committed_arenas_tail = null;
     }
 
-    fn release_heap_owned_values_unlocked(self: *Shard) void {
+    fn releaseHeapOwnedValuesUnlocked(self: *Shard) void {
         const Context = struct {
             shard: *Shard,
 
             fn visit(ctx_ptr: *anyopaque, key: []const u8, _: *const @import("../types/value.zig").Value) !void {
                 const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
-                const leaf = ctx.shard.tree.find_leaf_for_exact_key(key) orelse return;
+                const leaf = ctx.shard.tree.findLeafForExactKey(key) orelse return;
                 if (leaf.value_owner != art_node.ValueOwner.heap_allocation) return;
                 leaf.value.deinit(ctx.shard.base_allocator);
                 ctx.shard.base_allocator.destroy(leaf.value);
@@ -146,18 +146,18 @@ pub const Shard = struct {
         };
 
         var ctx = Context{ .shard = self };
-        _ = self.tree.for_each(&ctx, Context.visit) catch unreachable;
+        _ = self.tree.forEach(&ctx, Context.visit) catch unreachable;
     }
 
-    fn release_storage_unlocked(self: *Shard) void {
-        self.release_heap_owned_values_unlocked();
+    fn releaseStorageUnlocked(self: *Shard) void {
+        self.releaseHeapOwnedValuesUnlocked();
         var ttl_iterator = self.ttl_index.iterator();
         while (ttl_iterator.next()) |entry| {
             self.base_allocator.free(entry.key_ptr.*);
         }
         self.ttl_index.deinit(self.base_allocator);
         self.has_ttl_entries = false;
-        self.release_committed_arenas();
+        self.releaseCommittedArenas();
         self.arena.deinit();
     }
 
@@ -169,7 +169,7 @@ pub const Shard = struct {
     ///
     /// Thread Safety: Not thread-safe; caller must ensure exclusive ownership.
     pub fn deinit(self: *Shard) void {
-        self.release_storage_unlocked();
+        self.releaseStorageUnlocked();
         self.* = undefined;
     }
 
@@ -180,17 +180,17 @@ pub const Shard = struct {
     /// Allocator: Does not allocate; frees TTL metadata, releases committed arenas, and resets the primary shard arena with retained capacity.
     ///
     /// Thread Safety: Not thread-safe; caller must already hold exclusive shard ownership or otherwise prove no concurrent access.
-    pub fn reset_unlocked(self: *Shard) void {
-        self.release_heap_owned_values_unlocked();
+    pub fn resetUnlocked(self: *Shard) void {
+        self.releaseHeapOwnedValuesUnlocked();
         var ttl_iterator = self.ttl_index.iterator();
         while (ttl_iterator.next()) |entry| {
             self.base_allocator.free(entry.key_ptr.*);
         }
         self.ttl_index.clearRetainingCapacity();
         self.has_ttl_entries = false;
-        self.release_committed_arenas();
+        self.releaseCommittedArenas();
         _ = self.arena.reset(.retain_capacity);
-        @atomicStore(usize, &self.tree.root, art_node.node_empty(), .release);
+        @atomicStore(usize, &self.tree.root, art_node.nodeEmpty(), .release);
         self.tree.allocator = self.arena.allocator();
     }
 
@@ -201,13 +201,13 @@ pub const Shard = struct {
     /// Allocator: Does not allocate; releases old storage and takes ownership of `arena`, `ttl_index`, and `tree`.
     ///
     /// Thread Safety: Not thread-safe; caller must already hold exclusive shard ownership.
-    pub fn replace_storage_unlocked(
+    pub fn replaceStorageUnlocked(
         self: *Shard,
         arena: std.heap.ArenaAllocator,
         ttl_index: std.StringHashMapUnmanaged(i64),
         tree: art.Tree,
     ) void {
-        self.release_storage_unlocked();
+        self.releaseStorageUnlocked();
         self.arena = arena;
         self.committed_arenas_head = null;
         self.committed_arenas_tail = null;
@@ -221,8 +221,8 @@ pub const Shard = struct {
 test "get_shard_index is stable for the same hash tag" {
     const testing = std.testing;
 
-    const a = get_shard_index("{user:1}\x00name");
-    const b = get_shard_index("{user:1}\x00email");
+    const a = getShardIndex("{user:1}\x00name");
+    const b = getShardIndex("{user:1}\x00email");
 
     try testing.expectEqual(a, b);
     try testing.expect(a < NUM_SHARDS);
@@ -231,7 +231,7 @@ test "get_shard_index is stable for the same hash tag" {
 test "unix_now returns a recent unix timestamp" {
     const testing = std.testing;
 
-    const now = unix_now();
+    const now = unixNow();
     try testing.expect(now > 0);
 }
 
@@ -241,7 +241,7 @@ test "reset_unlocked leaves the shard empty and reusable" {
 
     var shard = Shard.init(testing.allocator);
     defer shard.deinit();
-    shard.rebind_tree_allocator();
+    shard.rebindTreeAllocator();
 
     const allocator = shard.arena.allocator();
     const value = try allocator.create(Value);
@@ -250,7 +250,7 @@ test "reset_unlocked leaves the shard empty and reusable" {
     try shard.ttl_index.put(testing.allocator, try testing.allocator.dupe(u8, "alpha"), 10);
     shard.has_ttl_entries = true;
 
-    shard.reset_unlocked();
+    shard.resetUnlocked();
 
     try testing.expect(shard.tree.lookup("alpha") == null);
     try testing.expectEqual(@as(usize, 0), shard.ttl_index.count());

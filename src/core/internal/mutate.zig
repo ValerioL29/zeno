@@ -32,7 +32,7 @@ pub const UpsertOutcome = struct {
 /// Time Complexity: O(k), where `k` is `key.len`.
 ///
 /// Allocator: Does not allocate.
-pub fn validate_key(key: []const u8) MutationError!void {
+pub fn validateKey(key: []const u8) MutationError!void {
     if (key.len == 0) return error.EmptyKey;
     if (key.len > codec.MAX_KEY_LEN) return error.KeyTooLarge;
 }
@@ -42,7 +42,7 @@ pub fn validate_key(key: []const u8) MutationError!void {
 /// Time Complexity: O(k), where `k` is `key.len`.
 ///
 /// Allocator: Does not allocate.
-pub fn key_exists_unlocked(shard: *const runtime_shard.Shard, key: []const u8) bool {
+pub fn keyExistsUnlocked(shard: *const runtime_shard.Shard, key: []const u8) bool {
     return shard.tree.lookup(key) != null;
 }
 
@@ -53,7 +53,7 @@ pub fn key_exists_unlocked(shard: *const runtime_shard.Shard, key: []const u8) b
 /// Allocator: Allocates the returned clone through `allocator` when the key exists.
 ///
 /// Ownership: Returns a caller-owned clone when non-null.
-pub fn clone_stored_value_unlocked(
+pub fn cloneStoredValueUnlocked(
     shard: *const runtime_shard.Shard,
     allocator: std.mem.Allocator,
     key: []const u8,
@@ -67,13 +67,13 @@ pub fn clone_stored_value_unlocked(
 /// Time Complexity: O(k + v), where `k` is `key.len` and `v` is the compared value tree size.
 ///
 /// Allocator: Does not allocate.
-pub fn stored_value_equals_unlocked(
+pub fn storedValueEqualsUnlocked(
     shard: *const runtime_shard.Shard,
     key: []const u8,
     expected: *const types.Value,
 ) bool {
     const stored = shard.tree.lookup(key) orelse return false;
-    return values_equal(stored, expected);
+    return valuesEqual(stored, expected);
 }
 
 /// Clones one key and value into shard-owned ART storage, inserting or replacing the live entry.
@@ -83,18 +83,18 @@ pub fn stored_value_equals_unlocked(
 /// Allocator: Uses the shard arena allocator for inserts; heavy overwrites allocate on the base allocator so replaced values can be freed individually.
 ///
 /// Ownership: Inserts clone into shard-owned arena storage; heavy overwrites clone into heap-owned storage and release previously heap-owned values when replaced.
-pub fn upsert_value_unlocked_with_overwrite_ownership_and_outcome(
+pub fn upsertValueUnlockedWithOverwriteOwnershipAndOutcome(
     shard: *runtime_shard.Shard,
     key: []const u8,
     value: *const types.Value,
     _: OverwriteOwnership,
 ) !UpsertOutcome {
-    if (shard.tree.find_leaf_for_exact_key(key)) |leaf| {
+    if (shard.tree.findLeafForExactKey(key)) |leaf| {
         const previous_owner = leaf.value_owner;
-        const previous_heavy_bytes = if (previous_owner == .tree_allocator) estimated_value_bytes(leaf.value) else 0;
+        const previous_heavy_bytes = if (previous_owner == .tree_allocator) estimatedValueBytes(leaf.value) else 0;
         const previous_heavy_event = previous_heavy_bytes != 0;
 
-        if (is_scalar_value(value)) {
+        if (isScalarValue(value)) {
             if (leaf.value_owner == .heap_allocation) {
                 leaf.value.deinit(shard.base_allocator);
             }
@@ -126,7 +126,7 @@ pub fn upsert_value_unlocked_with_overwrite_ownership_and_outcome(
         leaf.value = cloned.value;
         leaf.value_owner = cloned.owner;
         if (previous_owner == .heap_allocation) {
-            free_heap_value(shard.base_allocator, previous_value);
+            freeHeapValue(shard.base_allocator, previous_value);
         }
         return .{
             .overwritten = true,
@@ -153,54 +153,54 @@ pub fn upsert_value_unlocked_with_overwrite_ownership_and_outcome(
 /// Clones one key and value into shard-owned ART storage, inserting or replacing the live entry.
 ///
 /// Overwrite Ownership: Uses the selected ownership strategy for overwrite replacements.
-pub fn upsert_value_unlocked_with_overwrite_ownership(
+pub fn upsertValueUnlockedWithOverwriteOwnership(
     shard: *runtime_shard.Shard,
     key: []const u8,
     value: *const types.Value,
     overwrite_ownership: OverwriteOwnership,
 ) !bool {
-    const outcome = try upsert_value_unlocked_with_overwrite_ownership_and_outcome(shard, key, value, overwrite_ownership);
+    const outcome = try upsertValueUnlockedWithOverwriteOwnershipAndOutcome(shard, key, value, overwrite_ownership);
     return outcome.overwritten;
 }
 
 /// Clones one key and value into shard-owned ART storage, inserting or replacing the live entry.
 ///
 /// Overwrite Ownership: Uses shard arena storage for overwrite replacements.
-pub fn upsert_value_unlocked(
+pub fn upsertValueUnlocked(
     shard: *runtime_shard.Shard,
     key: []const u8,
     value: *const types.Value,
 ) !bool {
-    return upsert_value_unlocked_with_overwrite_ownership(shard, key, value, .tree_arena);
+    return upsertValueUnlockedWithOverwriteOwnership(shard, key, value, .tree_arena);
 }
 
 /// Clones one key and value into shard-owned ART storage and returns overwrite accounting details.
 ///
 /// Overwrite Ownership: Uses shard arena storage for overwrite replacements.
-pub fn upsert_value_unlocked_with_outcome(
+pub fn upsertValueUnlockedWithOutcome(
     shard: *runtime_shard.Shard,
     key: []const u8,
     value: *const types.Value,
 ) !UpsertOutcome {
-    return upsert_value_unlocked_with_overwrite_ownership_and_outcome(shard, key, value, .tree_arena);
+    return upsertValueUnlockedWithOverwriteOwnershipAndOutcome(shard, key, value, .tree_arena);
 }
 
 /// Attempts to overwrite an existing key's value without structural ART changes.
 /// Returns one overwrite outcome when the key exists.
 /// Returns null when the key does not exist and leaves the ART untouched.
 /// This path does not mutate ART structure (no splits, grows, shrinks, or child edits).
-pub fn try_overwrite_if_exists_unlocked(
+pub fn tryOverwriteIfExistsUnlocked(
     shard: *runtime_shard.Shard,
     key: []const u8,
     value: *const types.Value,
 ) !?UpsertOutcome {
-    const leaf = shard.tree.find_leaf_for_exact_key(key) orelse return null;
+    const leaf = shard.tree.findLeafForExactKey(key) orelse return null;
     const previous_owner = leaf.value_owner;
 
-    const previous_heavy_bytes = if (previous_owner == .tree_allocator) estimated_value_bytes(leaf.value) else 0;
+    const previous_heavy_bytes = if (previous_owner == .tree_allocator) estimatedValueBytes(leaf.value) else 0;
     const previous_heavy_event = previous_heavy_bytes != 0;
 
-    if (is_scalar_value(value)) {
+    if (isScalarValue(value)) {
         if (previous_owner == .heap_allocation) {
             leaf.value.deinit(shard.base_allocator);
         }
@@ -208,7 +208,7 @@ pub fn try_overwrite_if_exists_unlocked(
         // Safety: publish with release to pair with GET's acquire load on the same
         // pointer address. The pointer value is unchanged; this acts as a release
         // fence ensuring the content write above is visible to readers.
-        leaf.store_value(leaf.value);
+        leaf.storeValue(leaf.value);
         return UpsertOutcome{
             .overwritten = true,
             .previous_heavy_bytes = previous_heavy_bytes,
@@ -224,10 +224,10 @@ pub fn try_overwrite_if_exists_unlocked(
     cloned_value.* = try value.clone(shard.base_allocator);
 
     const previous_value = leaf.value;
-    leaf.store_value(cloned_value);
+    leaf.storeValue(cloned_value);
     leaf.value_owner = .heap_allocation;
     if (previous_owner == .heap_allocation) {
-        free_heap_value(shard.base_allocator, previous_value);
+        freeHeapValue(shard.base_allocator, previous_value);
     }
 
     return UpsertOutcome{
@@ -237,7 +237,7 @@ pub fn try_overwrite_if_exists_unlocked(
     };
 }
 
-fn is_scalar_value(value: *const types.Value) bool {
+fn isScalarValue(value: *const types.Value) bool {
     return switch (value.*) {
         .null_val, .boolean, .integer, .float => true,
         .string, .array, .object => false,
@@ -245,12 +245,12 @@ fn is_scalar_value(value: *const types.Value) bool {
 }
 
 /// Returns whether a value is heavy (owns variable-sized payload storage).
-pub fn is_heavy_value(value: *const types.Value) bool {
-    return !is_scalar_value(value);
+pub fn isHeavyValue(value: *const types.Value) bool {
+    return !isScalarValue(value);
 }
 
 /// Estimates retained bytes for one stored value tree.
-pub fn estimated_value_bytes(value: *const types.Value) u64 {
+pub fn estimatedValueBytes(value: *const types.Value) u64 {
     return switch (value.*) {
         .null_val => 0,
         .boolean => 0,
@@ -259,7 +259,7 @@ pub fn estimated_value_bytes(value: *const types.Value) u64 {
         .string => |payload| payload.len,
         .array => |items| blk: {
             var total: u64 = 0;
-            for (items.items) |*item| total += estimated_value_bytes(item);
+            for (items.items) |*item| total += estimatedValueBytes(item);
             break :blk total;
         },
         .object => |entries| blk: {
@@ -267,7 +267,7 @@ pub fn estimated_value_bytes(value: *const types.Value) u64 {
             var iterator = entries.iterator();
             while (iterator.next()) |entry| {
                 total += entry.key_ptr.*.len;
-                total += estimated_value_bytes(entry.value_ptr);
+                total += estimatedValueBytes(entry.value_ptr);
             }
             break :blk total;
         },
@@ -279,11 +279,11 @@ pub fn estimated_value_bytes(value: *const types.Value) u64 {
 /// Time Complexity: O(k + v), where `k` is `key.len` and `v` is teardown cost for the removed value.
 ///
 /// Allocator: Does not allocate directly; any ART restructuring uses the tree allocator.
-pub fn remove_stored_value_unlocked(
+pub fn removeStoredValueUnlocked(
     shard: *runtime_shard.Shard,
     key: []const u8,
 ) !bool {
-    const existing_leaf = shard.tree.find_leaf_for_exact_key(key) orelse return false;
+    const existing_leaf = shard.tree.findLeafForExactKey(key) orelse return false;
     const removed_value = existing_leaf.value;
     const removed_owner = existing_leaf.value_owner;
 
@@ -292,7 +292,7 @@ pub fn remove_stored_value_unlocked(
         error.InvalidNodeType, error.InvalidNodeShrink => unreachable,
     };
     if (removed and removed_owner == .heap_allocation) {
-        free_heap_value(shard.base_allocator, removed_value);
+        freeHeapValue(shard.base_allocator, removed_value);
     }
     return removed;
 }
@@ -302,7 +302,7 @@ pub fn remove_stored_value_unlocked(
 /// Time Complexity: O(v), where `v` is the nested value size.
 ///
 /// Allocator: Does not allocate; recursively frees `value` through `allocator`.
-pub fn free_heap_value(allocator: std.mem.Allocator, value: *types.Value) void {
+pub fn freeHeapValue(allocator: std.mem.Allocator, value: *types.Value) void {
     value.deinit(allocator);
     allocator.destroy(value);
 }
@@ -312,8 +312,8 @@ pub fn free_heap_value(allocator: std.mem.Allocator, value: *types.Value) void {
 /// Time Complexity: O(k), where `k` is `key.len`.
 ///
 /// Allocator: Does not allocate.
-pub fn value_is_heap_owned_unlocked(shard: *const runtime_shard.Shard, key: []const u8) bool {
-    const leaf = @constCast(&shard.tree).find_leaf_for_exact_key(key) orelse return false;
+pub fn valueIsHeapOwnedUnlocked(shard: *const runtime_shard.Shard, key: []const u8) bool {
+    const leaf = @constCast(&shard.tree).findLeafForExactKey(key) orelse return false;
     return leaf.value_owner == art_node.ValueOwner.heap_allocation;
 }
 
@@ -322,7 +322,7 @@ pub fn value_is_heap_owned_unlocked(shard: *const runtime_shard.Shard, key: []co
 /// Time Complexity: O(a), where `a` is the committed arena chain length.
 ///
 /// Allocator: Does not allocate.
-pub fn count_committed_arenas_unlocked(shard: *const runtime_shard.Shard) usize {
+pub fn countCommittedArenasUnlocked(shard: *const runtime_shard.Shard) usize {
     var count: usize = 0;
     var current = shard.committed_arenas_head;
     while (current) |arena| {
@@ -337,7 +337,7 @@ pub fn count_committed_arenas_unlocked(shard: *const runtime_shard.Shard) usize 
 /// Time Complexity: O(v), where `v` is the combined compared value tree size.
 ///
 /// Allocator: Does not allocate.
-pub fn values_equal(left: *const types.Value, right: *const types.Value) bool {
+pub fn valuesEqual(left: *const types.Value, right: *const types.Value) bool {
     return switch (left.*) {
         .null_val => switch (right.*) {
             .null_val => true,
@@ -363,7 +363,7 @@ pub fn values_equal(left: *const types.Value, right: *const types.Value) bool {
             .array => |other| blk: {
                 if (payload.items.len != other.items.len) break :blk false;
                 for (payload.items, other.items) |*item, *other_item| {
-                    if (!values_equal(item, other_item)) break :blk false;
+                    if (!valuesEqual(item, other_item)) break :blk false;
                 }
                 break :blk true;
             },
@@ -375,7 +375,7 @@ pub fn values_equal(left: *const types.Value, right: *const types.Value) bool {
                 var iterator = payload.iterator();
                 while (iterator.next()) |entry| {
                     const other_value = other.getPtr(entry.key_ptr.*) orelse break :blk false;
-                    if (!values_equal(entry.value_ptr, other_value)) break :blk false;
+                    if (!valuesEqual(entry.value_ptr, other_value)) break :blk false;
                 }
                 break :blk true;
             },
@@ -387,8 +387,8 @@ pub fn values_equal(left: *const types.Value, right: *const types.Value) bool {
 test "validate_key rejects empty and oversized keys" {
     const testing = std.testing;
 
-    try testing.expectError(error.EmptyKey, validate_key(""));
-    try testing.expectError(error.KeyTooLarge, validate_key(&[_]u8{'a'} ** (codec.MAX_KEY_LEN + 1)));
+    try testing.expectError(error.EmptyKey, validateKey(""));
+    try testing.expectError(error.KeyTooLarge, validateKey(&[_]u8{'a'} ** (codec.MAX_KEY_LEN + 1)));
 }
 
 test "values_equal compares nested values by content" {
@@ -421,6 +421,6 @@ test "values_equal compares nested values by content" {
     const right = types.Value{ .object = right_entries };
     const different = types.Value{ .object = std.StringHashMapUnmanaged(types.Value){} };
 
-    try testing.expect(values_equal(&left, &right));
-    try testing.expect(!values_equal(&left, &different));
+    try testing.expect(valuesEqual(&left, &right));
+    try testing.expect(!valuesEqual(&left, &different));
 }

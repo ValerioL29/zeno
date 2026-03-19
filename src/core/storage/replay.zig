@@ -128,7 +128,7 @@ const ReplayBatchState = struct {
     /// Time Complexity: O(k + v), where `k` is `mutation.key.len` and `v` is `mutation.value.len`.
     ///
     /// Allocator: Duplicates key and value bytes into the batch arena.
-    fn append_mutation(self: *ReplayBatchState, mutation: *const ScannedRecord) !void {
+    fn appendMutation(self: *ReplayBatchState, mutation: *const ScannedRecord) !void {
         const arena_allocator = self.arena.allocator();
         try self.mutations.append(arena_allocator, .{
             .tag = mutation.tag,
@@ -178,20 +178,20 @@ pub fn replay(applier: anytype, allocator: std.mem.Allocator, file: std.fs.File,
     defer if (pending_batch) |*batch| batch.deinit();
 
     while (true) {
-        const scanned = try scan_next_record(file, allocator, &key_buf, &val_buf);
+        const scanned = try scanNextRecord(file, allocator, &key_buf, &val_buf);
         switch (scanned.class) {
             .eof => break,
             .partial_eof => {
                 if (pending_batch) |batch| {
-                    try truncate_at(file, batch.begin_offset);
+                    try truncateAt(file, batch.begin_offset);
                 } else {
-                    try truncate_at(file, scanned.record.?.start_offset);
+                    try truncateAt(file, scanned.record.?.start_offset);
                 }
                 return result;
             },
             .corrupt => {
                 const truncate_offset = if (pending_batch) |batch| batch.begin_offset else scanned.record.?.start_offset;
-                try truncate_at(file, truncate_offset);
+                try truncateAt(file, truncate_offset);
                 return result;
             },
             .valid => {},
@@ -199,15 +199,15 @@ pub fn replay(applier: anytype, allocator: std.mem.Allocator, file: std.fs.File,
         const record = scanned.record.?;
 
         if (pending_batch != null and record.tag == tag_batch_begin) {
-            try truncate_at(file, pending_batch.?.begin_offset);
+            try truncateAt(file, pending_batch.?.begin_offset);
             return result;
         }
         if (pending_batch == null and record.tag == tag_batch_commit) {
-            try truncate_at(file, record.start_offset);
+            try truncateAt(file, record.start_offset);
             return result;
         }
 
-        defer maybe_drop_replay_scratch(allocator, &key_buf, &val_buf, record.key.len, record.value.len);
+        defer maybeDropReplayScratch(allocator, &key_buf, &val_buf, record.key.len, record.value.len);
 
         switch (record.payload) {
             .batch_begin => |member_record_count| {
@@ -217,7 +217,7 @@ pub fn replay(applier: anytype, allocator: std.mem.Allocator, file: std.fs.File,
             },
             .batch_commit => |commit| {
                 if (pending_batch == null) {
-                    try truncate_at(file, record.start_offset);
+                    try truncateAt(file, record.start_offset);
                     return result;
                 }
 
@@ -226,12 +226,12 @@ pub fn replay(applier: anytype, allocator: std.mem.Allocator, file: std.fs.File,
                     commit.member_record_count != batch.member_record_count or
                     batch.seen_mutations != batch.member_record_count)
                 {
-                    try truncate_at(file, batch.begin_offset);
+                    try truncateAt(file, batch.begin_offset);
                     return result;
                 }
 
                 if (batch.mode == .buffer_batch) {
-                    const completed = try apply_buffered_batch(applier, decode_arena.allocator(), &result, batch, file);
+                    const completed = try applyBufferedBatch(applier, decode_arena.allocator(), &result, batch, file);
                     if (!completed) {
                         batch.deinit();
                         pending_batch = null;
@@ -247,11 +247,11 @@ pub fn replay(applier: anytype, allocator: std.mem.Allocator, file: std.fs.File,
                 if (pending_batch) |*batch| {
                     batch.seen_mutations += 1;
                     if (batch.seen_mutations > batch.member_record_count) {
-                        try truncate_at(file, batch.begin_offset);
+                        try truncateAt(file, batch.begin_offset);
                         return result;
                     }
                     if (batch.mode == .buffer_batch) {
-                        try batch.append_mutation(&record);
+                        try batch.appendMutation(&record);
                     }
                     continue;
                 }
@@ -261,14 +261,14 @@ pub fn replay(applier: anytype, allocator: std.mem.Allocator, file: std.fs.File,
                     continue;
                 }
 
-                const applied = try apply_replay_mutation(applier, &decode_arena, &result, &record, file, record.start_offset);
+                const applied = try applyReplayMutation(applier, &decode_arena, &result, &record, file, record.start_offset);
                 if (!applied) return result;
             },
         }
     }
 
     if (pending_batch) |*batch| {
-        try truncate_at(file, batch.begin_offset);
+        try truncateAt(file, batch.begin_offset);
         batch.deinit();
         pending_batch = null;
     }
@@ -288,7 +288,7 @@ pub fn replay(applier: anytype, allocator: std.mem.Allocator, file: std.fs.File,
 /// Allocator: Uses `allocator` for reusable scan scratch and temporary copied-record buffers.
 ///
 /// Ownership: Borrows `src_file` and `dst_file` for the duration of the rewrite only.
-pub fn compact_up_to_lsn(
+pub fn compactUpToLsn(
     allocator: std.mem.Allocator,
     src_file: std.fs.File,
     dst_file: std.fs.File,
@@ -307,7 +307,7 @@ pub fn compact_up_to_lsn(
     defer pending_bytes.deinit(allocator);
 
     while (true) {
-        const scanned = try scan_next_record(src_file, allocator, &key_buf, &val_buf);
+        const scanned = try scanNextRecord(src_file, allocator, &key_buf, &val_buf);
         switch (scanned.class) {
             .eof => break,
             .partial_eof, .corrupt => break,
@@ -318,10 +318,10 @@ pub fn compact_up_to_lsn(
 
         if (batch_is_pending and record_item.tag == tag_batch_begin) break;
         if (!batch_is_pending and record_item.tag == tag_batch_commit) break;
-        if (batch_is_pending and !is_mutation_tag(record_item.tag) and record_item.tag != tag_batch_commit) break;
+        if (batch_is_pending and !isMutationTag(record_item.tag) and record_item.tag != tag_batch_commit) break;
 
-        try load_record_bytes(src_file, allocator, &record, record_item.start_offset, record_item.end_offset);
-        defer maybe_drop_replay_scratch(allocator, &key_buf, &val_buf, record_item.key.len, record_item.value.len);
+        try loadRecordBytes(src_file, allocator, &record, record_item.start_offset, record_item.end_offset);
+        defer maybeDropReplayScratch(allocator, &key_buf, &val_buf, record_item.key.len, record_item.value.len);
 
         switch (record_item.payload) {
             .batch_begin => |member_record_count| {
@@ -370,7 +370,7 @@ pub fn compact_up_to_lsn(
 /// Time Complexity: O(1) CPU work plus filesystem truncate latency.
 ///
 /// Allocator: Does not allocate.
-fn truncate_at(file: std.fs.File, offset: u64) !void {
+fn truncateAt(file: std.fs.File, offset: u64) !void {
     try file.setEndPos(offset);
     try file.seekTo(offset);
 }
@@ -380,7 +380,7 @@ fn truncate_at(file: std.fs.File, offset: u64) !void {
 /// Time Complexity: O(1).
 ///
 /// Allocator: May free and recreate the `ArrayList` backing storage through `allocator`.
-fn maybe_drop_replay_scratch(
+fn maybeDropReplayScratch(
     allocator: std.mem.Allocator,
     key_buf: *std.ArrayList(u8),
     val_buf: *std.ArrayList(u8),
@@ -402,7 +402,7 @@ fn maybe_drop_replay_scratch(
 /// Time Complexity: O(n), where `n` is `end_offset - start_offset`.
 ///
 /// Allocator: Resizes `buf` through its owned allocator; caller retains ownership of the copied bytes.
-fn load_record_bytes(
+fn loadRecordBytes(
     file: std.fs.File,
     allocator: std.mem.Allocator,
     buf: *std.ArrayList(u8),
@@ -425,7 +425,7 @@ fn load_record_bytes(
 /// Allocator: Uses `decode_arena` only for decoded `PUT` values.
 ///
 /// Ownership: Borrows record slices for the duration of the callback only.
-fn apply_replay_mutation(
+fn applyReplayMutation(
     applier: anytype,
     decode_arena: *std.heap.ArenaAllocator,
     result: *ReplayResult,
@@ -437,9 +437,9 @@ fn apply_replay_mutation(
         .put => {
             var fbs = std.io.fixedBufferStream(record.value);
             const decode_allocator = decode_arena.allocator();
-            const value = codec.deserialize_value(fbs.reader(), decode_allocator, 0) catch |err| switch (err) {
+            const value = codec.deserializeValue(fbs.reader(), decode_allocator, 0) catch |err| switch (err) {
                 error.MaxDepthExceeded, error.UnknownValueTag => {
-                    try truncate_at(file, truncate_offset);
+                    try truncateAt(file, truncate_offset);
                     return false;
                 },
                 else => return err,
@@ -448,7 +448,7 @@ fn apply_replay_mutation(
             _ = decode_arena.reset(.retain_capacity);
         },
         .delete => try applier.delete(applier.ctx, record.key),
-        .expire => |expire_at| try applier.expire(applier.ctx, record.key, expire_at),
+        .expire => |expireAt| try applier.expire(applier.ctx, record.key, expireAt),
         .batch_begin, .batch_commit => unreachable,
     }
 
@@ -462,7 +462,7 @@ fn apply_replay_mutation(
 /// Time Complexity: O(n * (k + v)), where `n` is `batch.mutations.items.len`.
 ///
 /// Allocator: Uses `allocator` for the temporary decode arena only.
-fn apply_buffered_batch(
+fn applyBufferedBatch(
     applier: anytype,
     allocator: std.mem.Allocator,
     result: *ReplayResult,
@@ -473,8 +473,8 @@ fn apply_buffered_batch(
     defer decode_arena.deinit();
 
     for (batch.mutations.items) |mutation| {
-        const payload = decode_record_payload(mutation.tag, mutation.key, mutation.value) orelse {
-            try truncate_at(file, batch.begin_offset);
+        const payload = decodeRecordPayload(mutation.tag, mutation.key, mutation.value) orelse {
+            try truncateAt(file, batch.begin_offset);
             return false;
         };
         const record = ScannedRecord{
@@ -486,7 +486,7 @@ fn apply_buffered_batch(
             .value = mutation.value,
             .payload = payload,
         };
-        const applied = try apply_replay_mutation(applier, &decode_arena, result, &record, file, batch.begin_offset);
+        const applied = try applyReplayMutation(applier, &decode_arena, result, &record, file, batch.begin_offset);
         if (!applied) return false;
     }
 
@@ -500,7 +500,7 @@ fn apply_buffered_batch(
 /// Allocator: Reuses `key_buf` and `val_buf`; may grow them to fit the next record.
 ///
 /// Ownership: Returned `key` and `value` slices borrow `key_buf` and `val_buf` storage until the next scan.
-fn scan_next_record(
+fn scanNextRecord(
     file: std.fs.File,
     allocator: std.mem.Allocator,
     key_buf: *std.ArrayList(u8),
@@ -509,7 +509,7 @@ fn scan_next_record(
     const record_start = try file.getPos();
 
     var crc_buf: [4]u8 = undefined;
-    switch (try read_exact_classified_file(file, &crc_buf)) {
+    switch (try readExactClassifiedFile(file, &crc_buf)) {
         .ok => {},
         .eof => return .{ .class = .eof, .record = null },
         .partial => return .{ .class = .partial_eof, .record = .{
@@ -525,7 +525,7 @@ fn scan_next_record(
     const stored_crc = std.mem.readInt(u32, &crc_buf, .little);
 
     var lsn_buf: [8]u8 = undefined;
-    switch (try read_exact_classified_file(file, &lsn_buf)) {
+    switch (try readExactClassifiedFile(file, &lsn_buf)) {
         .ok => {},
         .eof, .partial => return .{ .class = .partial_eof, .record = .{
             .start_offset = record_start,
@@ -540,7 +540,7 @@ fn scan_next_record(
     const lsn = std.mem.readInt(u64, &lsn_buf, .little);
 
     var tag_buf: [1]u8 = undefined;
-    switch (try read_exact_classified_file(file, &tag_buf)) {
+    switch (try readExactClassifiedFile(file, &tag_buf)) {
         .ok => {},
         .eof, .partial => return .{ .class = .partial_eof, .record = .{
             .start_offset = record_start,
@@ -553,7 +553,7 @@ fn scan_next_record(
         } },
     }
     const tag = tag_buf[0];
-    if (!is_known_tag(tag)) {
+    if (!isKnownTag(tag)) {
         return .{ .class = .corrupt, .record = .{
             .start_offset = record_start,
             .end_offset = try file.getPos(),
@@ -566,7 +566,7 @@ fn scan_next_record(
     }
 
     var key_len_buf: [2]u8 = undefined;
-    switch (try read_exact_classified_file(file, &key_len_buf)) {
+    switch (try readExactClassifiedFile(file, &key_len_buf)) {
         .ok => {},
         .eof, .partial => return .{ .class = .partial_eof, .record = .{
             .start_offset = record_start,
@@ -592,7 +592,7 @@ fn scan_next_record(
     }
 
     try key_buf.resize(allocator, key_len);
-    switch (try read_exact_classified_file(file, key_buf.items)) {
+    switch (try readExactClassifiedFile(file, key_buf.items)) {
         .ok => {},
         .eof, .partial => return .{ .class = .partial_eof, .record = .{
             .start_offset = record_start,
@@ -606,7 +606,7 @@ fn scan_next_record(
     }
 
     var val_len_buf: [4]u8 = undefined;
-    switch (try read_exact_classified_file(file, &val_len_buf)) {
+    switch (try readExactClassifiedFile(file, &val_len_buf)) {
         .ok => {},
         .eof, .partial => return .{ .class = .partial_eof, .record = .{
             .start_offset = record_start,
@@ -632,7 +632,7 @@ fn scan_next_record(
     }
 
     try val_buf.resize(allocator, val_len);
-    switch (try read_exact_classified_file(file, val_buf.items)) {
+    switch (try readExactClassifiedFile(file, val_buf.items)) {
         .ok => {},
         .eof, .partial => return .{ .class = .partial_eof, .record = .{
             .start_offset = record_start,
@@ -664,7 +664,7 @@ fn scan_next_record(
         } };
     }
 
-    const payload = decode_record_payload(tag, key_buf.items, val_buf.items) orelse return .{ .class = .corrupt, .record = .{
+    const payload = decodeRecordPayload(tag, key_buf.items, val_buf.items) orelse return .{ .class = .corrupt, .record = .{
         .start_offset = record_start,
         .end_offset = try file.getPos(),
         .lsn = lsn,
@@ -690,7 +690,7 @@ fn scan_next_record(
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-fn is_mutation_tag(tag: u8) bool {
+fn isMutationTag(tag: u8) bool {
     return tag == tag_put or tag == tag_delete or tag == tag_expire;
 }
 
@@ -699,8 +699,8 @@ fn is_mutation_tag(tag: u8) bool {
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-fn is_known_tag(tag: u8) bool {
-    return is_mutation_tag(tag) or tag == tag_batch_begin or tag == tag_batch_commit;
+fn isKnownTag(tag: u8) bool {
+    return isMutationTag(tag) or tag == tag_batch_begin or tag == tag_batch_commit;
 }
 
 /// Validates one scanned key/value payload against the expected record shape.
@@ -710,7 +710,7 @@ fn is_known_tag(tag: u8) bool {
 /// Allocator: Does not allocate.
 ///
 /// Ownership: Borrows `key` and `value`; does not retain them.
-fn decode_record_payload(tag: u8, key: []const u8, value: []const u8) ?RecordPayload {
+fn decodeRecordPayload(tag: u8, key: []const u8, value: []const u8) ?RecordPayload {
     return switch (tag) {
         tag_put => .put,
         tag_delete => if (value.len == 0) .delete else null,
@@ -739,7 +739,7 @@ const ReadClass = enum {
 /// Allocator: Does not allocate.
 ///
 /// Ownership: Fills the caller-owned `buf` in place.
-fn read_exact_classified_file(file: std.fs.File, buf: []u8) !ReadClass {
+fn readExactClassifiedFile(file: std.fs.File, buf: []u8) !ReadClass {
     if (buf.len == 0) return .ok;
     const read_count = try file.readAll(buf);
     if (read_count == 0) return .eof;

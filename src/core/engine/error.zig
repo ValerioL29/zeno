@@ -25,7 +25,7 @@ pub const EngineError = error{
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-pub fn map_persistence_error(err: anyerror) EngineError {
+pub fn mapPersistenceError(err: anyerror) EngineError {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.NoSnapshotPath => error.NoSnapshotPath,

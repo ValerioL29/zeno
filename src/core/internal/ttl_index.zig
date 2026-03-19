@@ -7,7 +7,7 @@ const runtime_shard = @import("../runtime/shard.zig");
 
 /// One prepared TTL insertion that can publish without allocating after WAL append.
 ///
-/// Ownership: Owns `owned_key` until `deinit` or `apply_prepared_set_ttl_entry_unlocked` consumes it.
+/// Ownership: Owns `owned_key` until `deinit` or `applyPreparedSetTtlEntryUnlocked` consumes it.
 pub const PreparedSetTtlEntry = struct {
     owned_key: ?[]u8 = null,
 
@@ -22,13 +22,13 @@ pub const PreparedSetTtlEntry = struct {
     }
 };
 
-/// Returns whether `expire_at` is at or before `now`.
+/// Returns whether `expireAt` is at or before `now`.
 ///
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-pub fn is_expired(expire_at: i64, now: i64) bool {
-    return expire_at <= now;
+pub fn isExpired(expireAt: i64, now: i64) bool {
+    return expireAt <= now;
 }
 
 /// Returns the stored absolute-expiration timestamp for `key`, when present.
@@ -36,7 +36,7 @@ pub fn is_expired(expire_at: i64, now: i64) bool {
 /// Time Complexity: O(1) expected.
 ///
 /// Allocator: Does not allocate.
-pub fn get_expire_at(shard: *const runtime_shard.Shard, key: []const u8) ?i64 {
+pub fn getExpireAt(shard: *const runtime_shard.Shard, key: []const u8) ?i64 {
     return shard.ttl_index.get(key);
 }
 
@@ -45,7 +45,7 @@ pub fn get_expire_at(shard: *const runtime_shard.Shard, key: []const u8) ?i64 {
 /// Time Complexity: O(1) expected.
 ///
 /// Allocator: Does not allocate; frees TTL-owned key bytes through `shard.base_allocator`.
-pub fn clear_ttl_entry(shard: *runtime_shard.Shard, key: []const u8) void {
+pub fn clearTtlEntry(shard: *runtime_shard.Shard, key: []const u8) void {
     if (shard.ttl_index.fetchRemove(key)) |removed| {
         shard.base_allocator.free(removed.key);
         shard.has_ttl_entries = shard.ttl_index.count() != 0;
@@ -57,7 +57,7 @@ pub fn clear_ttl_entry(shard: *runtime_shard.Shard, key: []const u8) void {
 /// Time Complexity: O(1) expected, plus O(k) key duplication when the key is not already present in the TTL map.
 ///
 /// Allocator: Uses `shard.base_allocator` for TTL-map growth and owned key bytes when insertion is required.
-pub fn prepare_set_ttl_entry(shard: *runtime_shard.Shard, key: []const u8) std.mem.Allocator.Error!PreparedSetTtlEntry {
+pub fn prepareSetTtlEntry(shard: *runtime_shard.Shard, key: []const u8) std.mem.Allocator.Error!PreparedSetTtlEntry {
     if (shard.ttl_index.contains(key)) return .{};
 
     try shard.ttl_index.ensureUnusedCapacity(shard.base_allocator, 1);
@@ -71,21 +71,21 @@ pub fn prepare_set_ttl_entry(shard: *runtime_shard.Shard, key: []const u8) std.m
 /// Time Complexity: O(1) expected.
 ///
 /// Allocator: Does not allocate; assumes any required TTL-map capacity and owned key bytes were prepared earlier.
-pub fn apply_prepared_set_ttl_entry_unlocked(
+pub fn applyPreparedSetTtlEntryUnlocked(
     shard: *runtime_shard.Shard,
     key: []const u8,
-    expire_at: i64,
+    expireAt: i64,
     prepared: PreparedSetTtlEntry,
 ) void {
     if (shard.ttl_index.getEntry(key)) |entry| {
         if (prepared.owned_key) |owned_key| shard.base_allocator.free(owned_key);
-        entry.value_ptr.* = expire_at;
+        entry.value_ptr.* = expireAt;
         shard.has_ttl_entries = true;
         return;
     }
 
     std.debug.assert(prepared.owned_key != null);
-    shard.ttl_index.putAssumeCapacityNoClobber(prepared.owned_key.?, expire_at);
+    shard.ttl_index.putAssumeCapacityNoClobber(prepared.owned_key.?, expireAt);
     shard.has_ttl_entries = true;
 }
 
@@ -94,16 +94,16 @@ pub fn apply_prepared_set_ttl_entry_unlocked(
 /// Time Complexity: O(1) expected, plus O(k) key duplication on insert.
 ///
 /// Allocator: Uses `shard.base_allocator` for owned key bytes and TTL map growth.
-pub fn set_ttl_entry(shard: *runtime_shard.Shard, key: []const u8, expire_at: i64) std.mem.Allocator.Error!void {
+pub fn setTtlEntry(shard: *runtime_shard.Shard, key: []const u8, expireAt: i64) std.mem.Allocator.Error!void {
     if (shard.ttl_index.getEntry(key)) |entry| {
-        entry.value_ptr.* = expire_at;
+        entry.value_ptr.* = expireAt;
         shard.has_ttl_entries = true;
         return;
     }
 
     const owned_key = try shard.base_allocator.dupe(u8, key);
     errdefer shard.base_allocator.free(owned_key);
-    try shard.ttl_index.put(shard.base_allocator, owned_key, expire_at);
+    try shard.ttl_index.put(shard.base_allocator, owned_key, expireAt);
     shard.has_ttl_entries = true;
 }
 
@@ -113,11 +113,11 @@ test "set_ttl_entry inserts then updates the same key" {
     var shard = runtime_shard.Shard.init(testing.allocator);
     defer shard.deinit();
 
-    try set_ttl_entry(&shard, "ttl:key", 10);
-    try testing.expectEqual(@as(?i64, 10), get_expire_at(&shard, "ttl:key"));
+    try setTtlEntry(&shard, "ttl:key", 10);
+    try testing.expectEqual(@as(?i64, 10), getExpireAt(&shard, "ttl:key"));
 
-    try set_ttl_entry(&shard, "ttl:key", 20);
-    try testing.expectEqual(@as(?i64, 20), get_expire_at(&shard, "ttl:key"));
+    try setTtlEntry(&shard, "ttl:key", 20);
+    try testing.expectEqual(@as(?i64, 20), getExpireAt(&shard, "ttl:key"));
 }
 
 test "clear_ttl_entry removes metadata and frees owned key bytes" {
@@ -126,9 +126,9 @@ test "clear_ttl_entry removes metadata and frees owned key bytes" {
     var shard = runtime_shard.Shard.init(testing.allocator);
     defer shard.deinit();
 
-    try set_ttl_entry(&shard, "ttl:key", 10);
-    clear_ttl_entry(&shard, "ttl:key");
-    try testing.expect(get_expire_at(&shard, "ttl:key") == null);
+    try setTtlEntry(&shard, "ttl:key", 10);
+    clearTtlEntry(&shard, "ttl:key");
+    try testing.expect(getExpireAt(&shard, "ttl:key") == null);
 }
 
 test "prepared ttl entry publishes without allocating" {
@@ -137,8 +137,8 @@ test "prepared ttl entry publishes without allocating" {
     var shard = runtime_shard.Shard.init(testing.allocator);
     defer shard.deinit();
 
-    const prepared = try prepare_set_ttl_entry(&shard, "ttl:key");
-    apply_prepared_set_ttl_entry_unlocked(&shard, "ttl:key", 10, prepared);
+    const prepared = try prepareSetTtlEntry(&shard, "ttl:key");
+    applyPreparedSetTtlEntryUnlocked(&shard, "ttl:key", 10, prepared);
 
-    try testing.expectEqual(@as(?i64, 10), get_expire_at(&shard, "ttl:key"));
+    try testing.expectEqual(@as(?i64, 10), getExpireAt(&shard, "ttl:key"));
 }

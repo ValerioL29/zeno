@@ -51,14 +51,14 @@ pub const BatchPlan = struct {
 /// Time Complexity: O(k + v), where `k` is key length and `v` is serialized value size.
 ///
 /// Allocator: Uses `scratch` growth through `scratch_allocator` and reuses retained capacity across writes.
-fn validate_write(
+fn validateWrite(
     scratch_allocator: std.mem.Allocator,
     scratch: *std.ArrayList(u8),
     write: batch.PutWrite,
 ) BatchPlanError!void {
-    try mutate.validate_key(write.key);
+    try mutate.validateKey(write.key);
     scratch.clearRetainingCapacity();
-    try codec.serialize_value(scratch_allocator, write.value, &scratch.*, 0);
+    try codec.serializeValue(scratch_allocator, write.value, &scratch.*, 0);
     if (scratch.items.len > codec.MAX_VAL_LEN) return error.ValueTooLarge;
 }
 
@@ -67,7 +67,7 @@ fn validate_write(
 /// Time Complexity: O(n + s + b), where `n` is `writes.len`, `s` is runtime shard count, and `b` is total serialized value bytes measured during validation.
 ///
 /// Allocator: Allocates the returned plan arena from `allocator` and uses temporary serializer scratch that is released before return.
-pub fn plan_put_batch(allocator: std.mem.Allocator, writes: []const batch.PutWrite) BatchPlanError!BatchPlan {
+pub fn planPutBatch(allocator: std.mem.Allocator, writes: []const batch.PutWrite) BatchPlanError!BatchPlan {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const arena_allocator = arena.allocator();
@@ -83,10 +83,10 @@ pub fn plan_put_batch(allocator: std.mem.Allocator, writes: []const batch.PutWri
     var survivor_count: usize = 0;
 
     for (writes, 0..) |write, index| {
-        try validate_write(allocator, &scratch, write);
+        try validateWrite(allocator, &scratch, write);
 
         const owned_key = try arena_allocator.dupe(u8, write.key);
-        const shard_idx = runtime_shard.get_shard_index(owned_key);
+        const shard_idx = runtime_shard.getShardIndex(owned_key);
         normalized_writes[index] = .{
             .key = owned_key,
             .value = write.value,
@@ -155,7 +155,7 @@ test "plan_put_batch keeps final values in first-declared key order within group
 
     const one = Value{ .integer = 1 };
     const two = Value{ .integer = 2 };
-    var plan = try plan_put_batch(testing.allocator, &.{
+    var plan = try planPutBatch(testing.allocator, &.{
         .{ .key = "a", .value = &one },
         .{ .key = "b", .value = &one },
         .{ .key = "a", .value = &two },
@@ -164,8 +164,8 @@ test "plan_put_batch keeps final values in first-declared key order within group
 
     try testing.expectEqual(@as(usize, 2), plan.writes.len);
 
-    const shard_a = runtime_shard.get_shard_index("a");
-    const shard_b = runtime_shard.get_shard_index("b");
+    const shard_a = runtime_shard.getShardIndex("a");
+    const shard_b = runtime_shard.getShardIndex("b");
     const first_expected = if (shard_a <= shard_b) "a" else "b";
     const second_expected = if (shard_a <= shard_b) "b" else "a";
     try testing.expectEqualStrings(first_expected, plan.writes[0].key);

@@ -24,10 +24,10 @@ var read_view_tokens = std.AutoHashMapUnmanaged(u64, ReadViewToken){};
 ///
 /// Allocator: Uses `std.heap.page_allocator` only when the registry grows.
 ///
-/// Ownership: Retains borrowed pointers inside the registry until `release_read_view_token` removes the token.
+/// Ownership: Retains borrowed pointers inside the registry until `releaseReadViewToken` removes the token.
 ///
 /// Thread Safety: Serializes registry mutation through `read_view_tokens_mutex`.
-fn register_read_view_token(
+fn registerReadViewToken(
     runtime_state: *const anyopaque,
     active_read_views: *ReadViewCounter,
     opened_at_unix_seconds: i64,
@@ -52,7 +52,7 @@ fn register_read_view_token(
 /// Ownership: Returns borrowed registry payload that remains valid only while the token stays active.
 ///
 /// Thread Safety: Serializes registry access through `read_view_tokens_mutex`.
-fn get_read_view_token(token_id: u64) ?ReadViewToken {
+fn getReadViewToken(token_id: u64) ?ReadViewToken {
     read_view_tokens_mutex.lock();
     defer read_view_tokens_mutex.unlock();
     return read_view_tokens.get(token_id);
@@ -67,7 +67,7 @@ fn get_read_view_token(token_id: u64) ?ReadViewToken {
 /// Ownership: Transfers the removed token payload to the caller, which then becomes responsible for releasing the borrowed visibility hold exactly once.
 ///
 /// Thread Safety: Serializes registry mutation through `read_view_tokens_mutex`.
-fn release_read_view_token(token_id: u64) ?ReadViewToken {
+fn releaseReadViewToken(token_id: u64) ?ReadViewToken {
     read_view_tokens_mutex.lock();
     defer read_view_tokens_mutex.unlock();
     const removed = read_view_tokens.fetchRemove(token_id) orelse return null;
@@ -90,7 +90,7 @@ pub const ReadView = struct {
         active_read_views: *ReadViewCounter,
         opened_at_unix_seconds: i64,
     ) std.mem.Allocator.Error!ReadView {
-        const token_id = try register_read_view_token(runtime_state, active_read_views, opened_at_unix_seconds);
+        const token_id = try registerReadViewToken(runtime_state, active_read_views, opened_at_unix_seconds);
         _ = active_read_views.fetchAdd(1, .monotonic);
         return .{
             .token_id = token_id,
@@ -104,8 +104,8 @@ pub const ReadView = struct {
     /// Allocator: Does not allocate.
     ///
     /// Ownership: Returns the borrowed runtime-state pointer only while the registry token is still active.
-    pub fn resolve_runtime_state(self: *const ReadView) ?*const anyopaque {
-        const token = get_read_view_token(self.token_id) orelse return null;
+    pub fn resolveRuntimeState(self: *const ReadView) ?*const anyopaque {
+        const token = getReadViewToken(self.token_id) orelse return null;
         return token.runtime_state;
     }
 
@@ -119,12 +119,12 @@ pub const ReadView = struct {
     ///
     /// Thread Safety: Not thread-safe; callers must not race `deinit` against other mutation of the same `ReadView` handle.
     pub fn deinit(self: *ReadView) void {
-        const token = release_read_view_token(self.token_id) orelse {
+        const token = releaseReadViewToken(self.token_id) orelse {
             self.token_id = 0;
             return;
         };
         const state: *const @import("../runtime/state.zig").DatabaseState = @ptrCast(@alignCast(token.runtime_state));
-        state.unlock_all_shards_shared();
+        state.unlockAllShardsShared();
         _ = token.active_read_views.fetchSub(1, .monotonic);
         self.token_id = 0;
     }
@@ -137,7 +137,7 @@ pub const ReadView = struct {
 /// Allocator: Does not allocate.
 ///
 /// Ownership: Returns the borrowed timestamp only while the registry token is still active.
-pub fn resolve_opened_at_unix_seconds(view: *const ReadView) ?i64 {
-    const token = get_read_view_token(view.token_id) orelse return null;
+pub fn resolveOpenedAtUnixSeconds(view: *const ReadView) ?i64 {
+    const token = getReadViewToken(view.token_id) orelse return null;
     return token.opened_at_unix_seconds;
 }

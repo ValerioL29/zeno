@@ -27,7 +27,7 @@ const val_object: u8 = 0x06;
 /// Time Complexity: O(n + b), where `n` is nested node count and `b` is emitted bytes.
 ///
 /// Allocator: Appends to `buf` using `allocator` for capacity growth.
-pub fn serialize_value(
+pub fn serializeValue(
     allocator: std.mem.Allocator,
     value: *const Value,
     buf: *std.ArrayList(u8),
@@ -54,24 +54,24 @@ pub fn serialize_value(
         },
         .string => |payload| {
             try buf.append(allocator, val_string);
-            try write_u32_le(allocator, buf, @intCast(payload.len));
+            try writeU32Le(allocator, buf, @intCast(payload.len));
             try buf.appendSlice(allocator, payload);
         },
         .array => |payload| {
             try buf.append(allocator, val_array);
-            try write_u32_le(allocator, buf, @intCast(payload.items.len));
+            try writeU32Le(allocator, buf, @intCast(payload.items.len));
             for (payload.items) |*item| {
-                try serialize_value(allocator, item, buf, depth + 1);
+                try serializeValue(allocator, item, buf, depth + 1);
             }
         },
         .object => |payload| {
             try buf.append(allocator, val_object);
-            try write_u32_le(allocator, buf, payload.count());
+            try writeU32Le(allocator, buf, payload.count());
             var iterator = payload.iterator();
             while (iterator.next()) |entry| {
-                try write_u32_le(allocator, buf, @intCast(entry.key_ptr.*.len));
+                try writeU32Le(allocator, buf, @intCast(entry.key_ptr.*.len));
                 try buf.appendSlice(allocator, entry.key_ptr.*);
-                try serialize_value(allocator, entry.value_ptr, buf, depth + 1);
+                try serializeValue(allocator, entry.value_ptr, buf, depth + 1);
             }
         },
     }
@@ -84,7 +84,7 @@ pub fn serialize_value(
 /// Allocator: Allocates decoded strings, arrays, and object storage from `allocator`.
 ///
 /// Ownership: Caller owns the returned value and must later call `deinit`.
-pub fn deserialize_value(reader: anytype, allocator: std.mem.Allocator, depth: usize) !Value {
+pub fn deserializeValue(reader: anytype, allocator: std.mem.Allocator, depth: usize) !Value {
     if (depth > MAX_DEPTH) return error.MaxDepthExceeded;
 
     const tag = try reader.readByte();
@@ -102,23 +102,23 @@ pub fn deserialize_value(reader: anytype, allocator: std.mem.Allocator, depth: u
             break :blk Value{ .float = @bitCast(std.mem.readInt(u64, &tmp, .little)) };
         },
         val_string => blk: {
-            const len = try read_u32_le(reader);
+            const len = try readU32Le(reader);
             const payload = try allocator.alloc(u8, len);
             errdefer allocator.free(payload);
             try reader.readNoEof(payload);
             break :blk Value{ .string = payload };
         },
         val_array => blk: {
-            const count = try read_u32_le(reader);
+            const count = try readU32Le(reader);
             var items = try std.ArrayList(Value).initCapacity(allocator, count);
             errdefer items.deinit(allocator);
             for (0..count) |_| {
-                items.appendAssumeCapacity(try deserialize_value(reader, allocator, depth + 1));
+                items.appendAssumeCapacity(try deserializeValue(reader, allocator, depth + 1));
             }
             break :blk Value{ .array = items };
         },
         val_object => blk: {
-            const count = try read_u32_le(reader);
+            const count = try readU32Le(reader);
             var entries = std.StringHashMapUnmanaged(Value){};
             try entries.ensureTotalCapacity(allocator, count);
             errdefer {
@@ -130,11 +130,11 @@ pub fn deserialize_value(reader: anytype, allocator: std.mem.Allocator, depth: u
             }
 
             for (0..count) |_| {
-                const key_len = try read_u32_le(reader);
+                const key_len = try readU32Le(reader);
                 const key = try allocator.alloc(u8, key_len);
                 errdefer allocator.free(key);
                 try reader.readNoEof(key);
-                const value = try deserialize_value(reader, allocator, depth + 1);
+                const value = try deserializeValue(reader, allocator, depth + 1);
                 entries.putAssumeCapacity(key, value);
             }
             break :blk Value{ .object = entries };
@@ -143,13 +143,13 @@ pub fn deserialize_value(reader: anytype, allocator: std.mem.Allocator, depth: u
     };
 }
 
-fn write_u32_le(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), value: u32) !void {
+fn writeU32Le(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), value: u32) !void {
     var tmp: [4]u8 = undefined;
     std.mem.writeInt(u32, &tmp, value, .little);
     try buf.appendSlice(allocator, &tmp);
 }
 
-fn read_u32_le(reader: anytype) !u32 {
+fn readU32Le(reader: anytype) !u32 {
     var tmp: [4]u8 = undefined;
     try reader.readNoEof(&tmp);
     return std.mem.readInt(u32, &tmp, .little);
@@ -174,10 +174,10 @@ test "serialize_value and deserialize_value roundtrip nested payloads" {
     try nested.put(allocator, try allocator.dupe(u8, "ok"), .{ .boolean = true });
 
     const original = Value{ .object = nested };
-    try serialize_value(allocator, &original, &buf, 0);
+    try serializeValue(allocator, &original, &buf, 0);
 
     var stream = std.io.fixedBufferStream(buf.items);
-    var decoded = try deserialize_value(stream.reader(), allocator, 0);
+    var decoded = try deserializeValue(stream.reader(), allocator, 0);
     defer decoded.deinit(allocator);
 
     switch (decoded) {

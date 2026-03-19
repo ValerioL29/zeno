@@ -111,7 +111,7 @@ pub const DatabaseState = struct {
     ///
     /// Thread Safety: Must be called before the state is shared across threads.
     pub fn init(base_allocator: std.mem.Allocator, snapshot_path: ?[]const u8) DatabaseState {
-        return init_with_metrics(base_allocator, snapshot_path, types.default_metrics_config());
+        return initWithMetrics(base_allocator, snapshot_path, types.defaultMetricsConfig());
     }
 
     /// Initializes runtime state for one engine handle with explicit metrics behavior.
@@ -121,7 +121,7 @@ pub const DatabaseState = struct {
     /// Allocator: Does not allocate during state construction; stores `base_allocator` so shards can later allocate owned key/value data.
     ///
     /// Thread Safety: Must be called before the state is shared across threads.
-    pub fn init_with_metrics(
+    pub fn initWithMetrics(
         base_allocator: std.mem.Allocator,
         snapshot_path: ?[]const u8,
         metrics_config: types.MetricsConfig,
@@ -142,7 +142,7 @@ pub const DatabaseState = struct {
         }
         for (&state.shards) |*shard| {
             shard.* = runtime_shard.Shard.init(base_allocator);
-            shard.rebind_tree_allocator();
+            shard.rebindTreeAllocator();
         }
         return state;
     }
@@ -154,8 +154,8 @@ pub const DatabaseState = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Must run before the state is shared across threads or whenever a by-value move may have invalidated shard-local allocator interfaces.
-    pub fn rebind_shard_allocators(self: *DatabaseState) void {
-        for (&self.shards) |*shard| shard.rebind_tree_allocator();
+    pub fn rebindShardAllocators(self: *DatabaseState) void {
+        for (&self.shards) |*shard| shard.rebindTreeAllocator();
     }
 
     /// Releases runtime state owned by one engine handle.
@@ -180,7 +180,7 @@ pub const DatabaseState = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Reads shared counter state through atomic loads with monotonic ordering.
-    pub fn stats_snapshot(self: *const DatabaseState) StatsCounters {
+    pub fn statsSnapshot(self: *const DatabaseState) StatsCounters {
         return StatsCounters.fromRuntime(&self.counters);
     }
 
@@ -191,7 +191,7 @@ pub const DatabaseState = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Uses atomic increments only; safe to call from concurrent engine entrypoints.
-    pub fn record_operation(self: *const DatabaseState, kind: OperationKind, count: u64) void {
+    pub fn recordOperation(self: *const DatabaseState, kind: OperationKind, count: u64) void {
         if (count == 0) return;
         if (self.metrics_config.mode == .disabled) return;
 
@@ -210,7 +210,7 @@ pub const DatabaseState = struct {
     /// Time Complexity: O(1).
     ///
     /// Allocator: Does not allocate.
-    pub fn record_heavy_overwrite_retained_bytes(
+    pub fn recordHeavyOverwriteRetainedBytes(
         self: *const DatabaseState,
         shard_idx: usize,
         retained_bytes: u64,
@@ -230,7 +230,7 @@ pub const DatabaseState = struct {
     /// Time Complexity: O(1).
     ///
     /// Allocator: Does not allocate.
-    pub fn clear_retained_heavy_bytes_estimate_for_shard(self: *const DatabaseState, shard_idx: usize) void {
+    pub fn clearRetainedHeavyBytesEstimateForShard(self: *const DatabaseState, shard_idx: usize) void {
         if (shard_idx >= NUM_SHARDS) return;
 
         const shard_estimate = @constCast(&self.retained_heavy_bytes_estimate_by_shard[shard_idx]).swap(0, .monotonic);
@@ -243,7 +243,7 @@ pub const DatabaseState = struct {
     /// Time Complexity: O(1).
     ///
     /// Allocator: Does not allocate.
-    pub fn retained_heavy_bytes_estimate_for_shard(self: *const DatabaseState, shard_idx: usize) u64 {
+    pub fn retainedHeavyBytesEstimateForShard(self: *const DatabaseState, shard_idx: usize) u64 {
         if (shard_idx >= NUM_SHARDS) return 0;
         return self.retained_heavy_bytes_estimate_by_shard[shard_idx].load(.monotonic);
     }
@@ -255,13 +255,13 @@ pub const DatabaseState = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Uses atomic sampling state only; safe to call from concurrent engine entrypoints.
-    pub fn should_record_latency(self: *const DatabaseState) bool {
+    pub fn shouldRecordLatency(self: *const DatabaseState) bool {
         return switch (self.metrics_config.mode) {
             .disabled, .counters_only => false,
             .full => true,
             .sampled_latency => blk: {
                 const sample_index = @constCast(&self.latency_sample_clock).fetchAdd(1, .monotonic);
-                break :blk (sample_index & latency_sample_mask(self.metrics_config.latency_sample_shift)) == 0;
+                break :blk (sample_index & latencySampleMask(self.metrics_config.latency_sample_shift)) == 0;
             },
         };
     }
@@ -273,7 +273,7 @@ pub const DatabaseState = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Uses atomic increments only; safe to call from concurrent engine entrypoints.
-    pub fn record_latency_sample(self: *const DatabaseState, latency_ns: u64) void {
+    pub fn recordLatencySample(self: *const DatabaseState, latency_ns: u64) void {
         switch (self.metrics_config.mode) {
             .disabled, .counters_only => return,
             .sampled_latency, .full => {},
@@ -300,7 +300,7 @@ pub const DatabaseState = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Uses atomic updates only; safe to call after a successful checkpoint under normal engine synchronization.
-    pub fn record_successful_checkpoint(self: *const DatabaseState, duration_ns: u64, checkpoint_lsn: u64) void {
+    pub fn recordSuccessfulCheckpoint(self: *const DatabaseState, duration_ns: u64, checkpoint_lsn: u64) void {
         _ = @constCast(&self.counters.checkpoint_count_total).fetchAdd(1, .monotonic);
         @constCast(&self.counters.checkpoint_duration_last_ms).store(duration_ns / std.time.ns_per_ms, .monotonic);
         @constCast(&self.counters.checkpoint_lsn_last).store(checkpoint_lsn, .monotonic);
@@ -313,7 +313,7 @@ pub const DatabaseState = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Uses atomic increments only; safe to call from concurrent checkpoint callers.
-    pub fn record_busy_checkpoint(self: *const DatabaseState) void {
+    pub fn recordBusyCheckpoint(self: *const DatabaseState) void {
         _ = @constCast(&self.counters.checkpoint_busy_total).fetchAdd(1, .monotonic);
     }
 
@@ -331,37 +331,37 @@ pub const DatabaseState = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Uses atomic increments only; safe to call from the single-threaded open path before publication.
-    pub fn record_snapshot_corruption_fallback(self: *const DatabaseState) void {
+    pub fn recordSnapshotCorruptionFallback(self: *const DatabaseState) void {
         _ = @constCast(&self.counters.snapshot_corruption_fallback_total).fetchAdd(1, .monotonic);
     }
 
     /// Acquires the shared side of all shard-local visibility gates.
     ///
     /// Time Complexity: O(s), where `s` is the shard count.
-    pub fn lock_all_shards_shared(self: *const DatabaseState) void {
+    pub fn lockAllShardsShared(self: *const DatabaseState) void {
         var i: usize = 0;
         while (i < NUM_SHARDS) : (i += 1) {
-            @constCast(&self.shards[i].visibility_gate).lock_shared();
+            @constCast(&self.shards[i].visibility_gate).lockShared();
         }
     }
 
     /// Releases the shared side of all shard-local visibility gates.
     ///
     /// Time Complexity: O(s), where `s` is the shard count.
-    pub fn unlock_all_shards_shared(self: *const DatabaseState) void {
+    pub fn unlockAllShardsShared(self: *const DatabaseState) void {
         var i: usize = 0;
         while (i < NUM_SHARDS) : (i += 1) {
-            @constCast(&self.shards[i].visibility_gate).unlock_shared();
+            @constCast(&self.shards[i].visibility_gate).unlockShared();
         }
     }
 
     /// Acquires the exclusive side of all shard-local visibility gates.
     ///
     /// Time Complexity: O(s), where `s` is the shard count.
-    pub fn lock_all_shards_exclusive(self: *const DatabaseState) void {
+    pub fn lockAllShardsExclusive(self: *const DatabaseState) void {
         var i: usize = 0;
         while (i < NUM_SHARDS) : (i += 1) {
-            @constCast(&self.shards[i].visibility_gate).lock_exclusive();
+            @constCast(&self.shards[i].visibility_gate).lockExclusive();
         }
     }
 
@@ -374,14 +374,14 @@ pub const DatabaseState = struct {
     ///
     /// TODO: Replace this global gate barrier with sequence/epoch-based visibility
     /// so long-lived read views stop contending with checkpoint barriers.
-    pub fn try_lock_all_shards_exclusive(self: *const DatabaseState) bool {
+    pub fn tryLockAllShardsExclusive(self: *const DatabaseState) bool {
         var i: usize = 0;
         while (i < NUM_SHARDS) : (i += 1) {
-            if (@constCast(&self.shards[i].visibility_gate).try_lock_exclusive()) continue;
+            if (@constCast(&self.shards[i].visibility_gate).tryLockExclusive()) continue;
 
             var release_idx: usize = 0;
             while (release_idx < i) : (release_idx += 1) {
-                @constCast(&self.shards[release_idx].visibility_gate).unlock_exclusive();
+                @constCast(&self.shards[release_idx].visibility_gate).unlockExclusive();
             }
             return false;
         }
@@ -391,15 +391,15 @@ pub const DatabaseState = struct {
     /// Releases the exclusive side of all shard-local visibility gates.
     ///
     /// Time Complexity: O(s), where `s` is the shard count.
-    pub fn unlock_all_shards_exclusive(self: *const DatabaseState) void {
+    pub fn unlockAllShardsExclusive(self: *const DatabaseState) void {
         var i: usize = 0;
         while (i < NUM_SHARDS) : (i += 1) {
-            @constCast(&self.shards[i].visibility_gate).unlock_exclusive();
+            @constCast(&self.shards[i].visibility_gate).unlockExclusive();
         }
     }
 };
 
-fn latency_sample_mask(shift: u8) u64 {
+fn latencySampleMask(shift: u8) u64 {
     if (shift >= 63) return std.math.maxInt(u64);
     return (@as(u64, 1) << @as(u6, @intCast(shift))) - 1;
 }
@@ -410,7 +410,7 @@ test "database state metrics start at zero" {
     var state = DatabaseState.init(testing.allocator, null);
     defer state.deinit();
 
-    const snapshot = state.stats_snapshot();
+    const snapshot = state.statsSnapshot();
     try testing.expectEqual(@as(u64, 0), snapshot.ops_put_total);
     try testing.expectEqual(@as(u64, 0), snapshot.overwrites_total);
     try testing.expectEqual(@as(u64, 0), snapshot.overwritten_heavy_events_total);
@@ -431,16 +431,16 @@ test "database state metrics start at zero" {
 test "database state metrics disabled mode skips counters and latency" {
     const testing = std.testing;
 
-    var state = DatabaseState.init_with_metrics(testing.allocator, null, .{
+    var state = DatabaseState.initWithMetrics(testing.allocator, null, .{
         .mode = .disabled,
     });
     defer state.deinit();
 
-    state.record_operation(.put, 4);
-    state.record_operation(.overwrite, 2);
-    state.record_latency_sample(500);
+    state.recordOperation(.put, 4);
+    state.recordOperation(.overwrite, 2);
+    state.recordLatencySample(500);
 
-    const snapshot = state.stats_snapshot();
+    const snapshot = state.statsSnapshot();
     try testing.expectEqual(@as(u64, 0), snapshot.ops_put_total);
     try testing.expectEqual(@as(u64, 0), snapshot.overwrites_total);
     try testing.expectEqual(@as(u64, 0), snapshot.overwritten_heavy_events_total);
@@ -452,17 +452,17 @@ test "database state metrics disabled mode skips counters and latency" {
 test "database state metrics counters only mode updates ops without latency" {
     const testing = std.testing;
 
-    var state = DatabaseState.init_with_metrics(testing.allocator, null, .{
+    var state = DatabaseState.initWithMetrics(testing.allocator, null, .{
         .mode = .counters_only,
     });
     defer state.deinit();
 
-    state.record_operation(.put, 2);
-    state.record_operation(.overwrite, 3);
-    state.record_operation(.scan, 1);
-    state.record_latency_sample(2 * std.time.ns_per_ms);
+    state.recordOperation(.put, 2);
+    state.recordOperation(.overwrite, 3);
+    state.recordOperation(.scan, 1);
+    state.recordLatencySample(2 * std.time.ns_per_ms);
 
-    const snapshot = state.stats_snapshot();
+    const snapshot = state.statsSnapshot();
     try testing.expectEqual(@as(u64, 2), snapshot.ops_put_total);
     try testing.expectEqual(@as(u64, 3), snapshot.overwrites_total);
     try testing.expectEqual(@as(u64, 0), snapshot.overwritten_heavy_events_total);
@@ -475,7 +475,7 @@ test "database state metrics counters only mode updates ops without latency" {
 test "database state sampled latency mode records only selected calls" {
     const testing = std.testing;
 
-    var state = DatabaseState.init_with_metrics(testing.allocator, null, .{
+    var state = DatabaseState.initWithMetrics(testing.allocator, null, .{
         .mode = .sampled_latency,
         .latency_sample_shift = 2,
     });
@@ -483,13 +483,13 @@ test "database state sampled latency mode records only selected calls" {
 
     var samples_taken: u64 = 0;
     for (0..8) |_| {
-        if (state.should_record_latency()) {
+        if (state.shouldRecordLatency()) {
             samples_taken += 1;
-            state.record_latency_sample(500);
+            state.recordLatencySample(500);
         }
     }
 
-    const snapshot = state.stats_snapshot();
+    const snapshot = state.statsSnapshot();
     try testing.expectEqual(@as(u64, 2), samples_taken);
     try testing.expectEqual(@as(u64, 2), snapshot.latency_lt_1us_total);
     try testing.expectEqual(@as(u64, 2), snapshot.latency_samples_total);
@@ -498,24 +498,24 @@ test "database state sampled latency mode records only selected calls" {
 test "database state full metrics snapshot reflects latency checkpoint and fallback updates" {
     const testing = std.testing;
 
-    var state = DatabaseState.init_with_metrics(testing.allocator, null, .{
+    var state = DatabaseState.initWithMetrics(testing.allocator, null, .{
         .mode = .full,
     });
     defer state.deinit();
 
-    state.record_latency_sample(500);
-    state.record_latency_sample(5 * std.time.ns_per_us);
-    state.record_latency_sample(50 * std.time.ns_per_us);
-    state.record_latency_sample(500 * std.time.ns_per_us);
-    state.record_latency_sample(2 * std.time.ns_per_ms);
-    state.record_successful_checkpoint(12 * std.time.ns_per_ms, 33);
-    state.record_busy_checkpoint();
-    state.record_snapshot_corruption_fallback();
-    state.record_heavy_overwrite_retained_bytes(0, 1_024, 1);
-    state.record_heavy_overwrite_retained_bytes(0, 256, 2);
-    state.clear_retained_heavy_bytes_estimate_for_shard(0);
+    state.recordLatencySample(500);
+    state.recordLatencySample(5 * std.time.ns_per_us);
+    state.recordLatencySample(50 * std.time.ns_per_us);
+    state.recordLatencySample(500 * std.time.ns_per_us);
+    state.recordLatencySample(2 * std.time.ns_per_ms);
+    state.recordSuccessfulCheckpoint(12 * std.time.ns_per_ms, 33);
+    state.recordBusyCheckpoint();
+    state.recordSnapshotCorruptionFallback();
+    state.recordHeavyOverwriteRetainedBytes(0, 1_024, 1);
+    state.recordHeavyOverwriteRetainedBytes(0, 256, 2);
+    state.clearRetainedHeavyBytesEstimateForShard(0);
 
-    const snapshot = state.stats_snapshot();
+    const snapshot = state.statsSnapshot();
     try testing.expectEqual(@as(u64, 0), snapshot.overwrites_total);
     try testing.expectEqual(@as(u64, 1), snapshot.latency_lt_1us_total);
     try testing.expectEqual(@as(u64, 1), snapshot.latency_lt_10us_total);

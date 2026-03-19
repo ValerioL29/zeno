@@ -12,16 +12,16 @@ const runtime_state = @import("../runtime/state.zig");
 /// Allocator: Does not allocate.
 ///
 /// Thread Safety: Uses runtime-state atomic metric updates only; delegated operation retains its own thread-safety contract.
-pub fn call_with_latency(
+pub fn callWithLatency(
     state: *const runtime_state.DatabaseState,
     comptime operation: anytype,
     args: anytype,
 ) @TypeOf(@call(.auto, operation, args)) {
-    if (!state.should_record_latency()) {
+    if (!state.shouldRecordLatency()) {
         return @call(.auto, operation, args);
     }
     var timer = std.time.Timer.start() catch unreachable;
-    defer state.record_latency_sample(timer.read());
+    defer state.recordLatencySample(timer.read());
     return @call(.auto, operation, args);
 }
 
@@ -32,13 +32,13 @@ pub fn call_with_latency(
 /// Allocator: Does not allocate.
 ///
 /// Thread Safety: Uses runtime-state atomic metric updates only when `state` is non-null; delegated operation retains its own thread-safety contract.
-pub fn call_with_optional_latency(
+pub fn callWithOptionalLatency(
     state: ?*const runtime_state.DatabaseState,
     comptime operation: anytype,
     args: anytype,
 ) @TypeOf(@call(.auto, operation, args)) {
     if (state) |resolved_state| {
-        if (!resolved_state.should_record_latency()) {
+        if (!resolved_state.shouldRecordLatency()) {
             return @call(.auto, operation, args);
         }
     } else {
@@ -46,41 +46,41 @@ pub fn call_with_optional_latency(
     }
     var timer = std.time.Timer.start() catch unreachable;
     defer if (state) |resolved_state| {
-        resolved_state.record_latency_sample(timer.read());
+        resolved_state.recordLatencySample(timer.read());
     };
     return @call(.auto, operation, args);
 }
 
-fn increment_counter(counter: *u32) void {
+fn incrementCounter(counter: *u32) void {
     counter.* += 1;
 }
 
 test "call_with_latency skips latency counters when disabled" {
     const testing = std.testing;
 
-    var state = runtime_state.DatabaseState.init_with_metrics(testing.allocator, null, .{
+    var state = runtime_state.DatabaseState.initWithMetrics(testing.allocator, null, .{
         .mode = .disabled,
     });
     defer state.deinit();
 
     var counter: u32 = 0;
-    call_with_latency(&state, increment_counter, .{&counter});
+    callWithLatency(&state, incrementCounter, .{&counter});
 
     try testing.expectEqual(@as(u32, 1), counter);
-    try testing.expectEqual(@as(u64, 0), state.stats_snapshot().latency_samples_total);
+    try testing.expectEqual(@as(u64, 0), state.statsSnapshot().latency_samples_total);
 }
 
 test "call_with_optional_latency records when full mode is enabled" {
     const testing = std.testing;
 
-    var state = runtime_state.DatabaseState.init_with_metrics(testing.allocator, null, .{
+    var state = runtime_state.DatabaseState.initWithMetrics(testing.allocator, null, .{
         .mode = .full,
     });
     defer state.deinit();
 
     var counter: u32 = 0;
-    call_with_optional_latency(&state, increment_counter, .{&counter});
+    callWithOptionalLatency(&state, incrementCounter, .{&counter});
 
     try testing.expectEqual(@as(u32, 1), counter);
-    try testing.expectEqual(@as(u64, 1), state.stats_snapshot().latency_samples_total);
+    try testing.expectEqual(@as(u64, 1), state.statsSnapshot().latency_samples_total);
 }

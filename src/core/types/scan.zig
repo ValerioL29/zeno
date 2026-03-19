@@ -75,7 +75,7 @@ pub const OwnedScanCursor = struct {
     /// Allocator: Does not allocate.
     ///
     /// Ownership: The returned cursor borrows continuation bytes from this owned cursor and remains valid only while this owned cursor stays active.
-    pub fn as_cursor(self: OwnedScanCursor) ?ScanCursor {
+    pub fn asCursor(self: OwnedScanCursor) ?ScanCursor {
         const resume_key = self.resume_key orelse return null;
         return .{ .resume_key = resume_key };
     }
@@ -88,7 +88,7 @@ pub const OwnedScanCursor = struct {
     ///
     /// Ownership: Returns one independent owned cursor when this cursor is still active, otherwise `null`.
     pub fn clone(self: OwnedScanCursor, allocator: std.mem.Allocator) std.mem.Allocator.Error!?OwnedScanCursor {
-        const cursor = self.as_cursor() orelse return null;
+        const cursor = self.asCursor() orelse return null;
         return @as(?OwnedScanCursor, try OwnedScanCursor.init(allocator, cursor.resume_key));
     }
 
@@ -136,11 +136,11 @@ pub const ScanResult = struct {
 ///
 /// Ownership:
 /// - The page owns all `entries`.
-/// - Any continuation cursor remains page-owned until `take_next_cursor`.
+/// - Any continuation cursor remains page-owned until `takeNextCursor`.
 pub const ScanPageResult = struct {
     entries: std.ArrayList(ScanEntry),
     allocator: std.mem.Allocator,
-    /// Private page-owned continuation cursor. Use `borrow_next_cursor` or `take_next_cursor` instead of depending on this representation.
+    /// Private page-owned continuation cursor. Use `borrowNextCursor` or `takeNextCursor` instead of depending on this representation.
     _next_cursor: ?OwnedScanCursor = null,
 
     /// Returns a borrowed continuation cursor while this page result stays alive.
@@ -149,10 +149,10 @@ pub const ScanPageResult = struct {
     ///
     /// Allocator: Does not allocate.
     ///
-    /// Ownership: Returns a borrowed cursor that remains valid only while this page result stays alive or until `take_next_cursor` transfers ownership away.
-    pub fn borrow_next_cursor(self: *const ScanPageResult) ?ScanCursor {
+    /// Ownership: Returns a borrowed cursor that remains valid only while this page result stays alive or until `takeNextCursor` transfers ownership away.
+    pub fn borrowNextCursor(self: *const ScanPageResult) ?ScanCursor {
         const owned_cursor = self._next_cursor orelse return null;
-        return owned_cursor.as_cursor();
+        return owned_cursor.asCursor();
     }
 
     /// Transfers ownership of the optional continuation cursor out of this page result.
@@ -162,7 +162,7 @@ pub const ScanPageResult = struct {
     /// Allocator: Does not allocate.
     ///
     /// Ownership: Returns one owned cursor when present and clears the page-owned slot so `deinit` will not release it twice.
-    pub fn take_next_cursor(self: *ScanPageResult) ?OwnedScanCursor {
+    pub fn takeNextCursor(self: *ScanPageResult) ?OwnedScanCursor {
         const cursor = self._next_cursor orelse return null;
         self._next_cursor = null;
         return cursor;

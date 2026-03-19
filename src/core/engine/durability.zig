@@ -16,13 +16,13 @@ pub const PutBatchWrite = storage_wal.PutBatchWrite;
 /// Time Complexity: O(k + v), where `k` is key length and `v` is serialized value size.
 ///
 /// Allocator: Does not allocate outside delegated WAL scratch.
-pub fn append_put_if_enabled(
+pub fn appendPutIfEnabled(
     state: *runtime_state.DatabaseState,
     key: []const u8,
     value: *const types.Value,
 ) error_mod.EngineError!void {
     if (state.wal) |*wal| {
-        wal.append_put(key, value) catch |err| return error_mod.map_persistence_error(err);
+        wal.appendPut(key, value) catch |err| return error_mod.mapPersistenceError(err);
     }
 }
 
@@ -31,13 +31,13 @@ pub fn append_put_if_enabled(
 /// Time Complexity: O(n * (k + v)), where `n` is `writes.len`.
 ///
 /// Allocator: Does not allocate outside delegated WAL scratch.
-pub fn append_put_group_if_enabled(
+pub fn appendPutGroupIfEnabled(
     state: *runtime_state.DatabaseState,
     writes: []const PutBatchWrite,
 ) error_mod.EngineError!void {
     if (writes.len == 0) return;
     if (state.wal) |*wal| {
-        wal.append_put_group(writes) catch |err| return error_mod.map_persistence_error(err);
+        wal.appendPutGroup(writes) catch |err| return error_mod.mapPersistenceError(err);
     }
 }
 
@@ -46,9 +46,9 @@ pub fn append_put_group_if_enabled(
 /// Time Complexity: O(k), where `k` is key length.
 ///
 /// Allocator: Does not allocate outside delegated WAL scratch.
-pub fn append_delete_if_enabled(state: *runtime_state.DatabaseState, key: []const u8) error_mod.EngineError!void {
+pub fn appendDeleteIfEnabled(state: *runtime_state.DatabaseState, key: []const u8) error_mod.EngineError!void {
     if (state.wal) |*wal| {
-        wal.append_delete(key) catch |err| return error_mod.map_persistence_error(err);
+        wal.appendDelete(key) catch |err| return error_mod.mapPersistenceError(err);
     }
 }
 
@@ -57,13 +57,13 @@ pub fn append_delete_if_enabled(state: *runtime_state.DatabaseState, key: []cons
 /// Time Complexity: O(k), where `k` is key length.
 ///
 /// Allocator: Does not allocate outside delegated WAL scratch.
-pub fn append_expire_if_enabled(
+pub fn appendExpireIfEnabled(
     state: *runtime_state.DatabaseState,
     key: []const u8,
     expire_at_seconds: i64,
 ) error_mod.EngineError!void {
     if (state.wal) |*wal| {
-        wal.append_expire(key, expire_at_seconds) catch |err| return error_mod.map_persistence_error(err);
+        wal.appendExpire(key, expire_at_seconds) catch |err| return error_mod.mapPersistenceError(err);
     }
 }
 
@@ -72,7 +72,7 @@ pub fn append_expire_if_enabled(
 /// Time Complexity: O(n * (k + v)), where `n` is `writes.len`.
 ///
 /// Allocator: Uses `allocator` only for the temporary batch-view slice.
-pub fn append_put_batch_if_enabled(
+pub fn appendPutBatchIfEnabled(
     state: *runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
     writes: []const PutBatchWrite,
@@ -81,5 +81,5 @@ pub fn append_put_batch_if_enabled(
     if (writes.len == 0) return;
     const wal = if (state.wal) |*owned_wal| owned_wal else return;
 
-    _ = wal.append_put_batch(writes) catch |err| return error_mod.map_persistence_error(err);
+    _ = wal.appendPutBatch(writes) catch |err| return error_mod.mapPersistenceError(err);
 }

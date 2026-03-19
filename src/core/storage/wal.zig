@@ -79,7 +79,7 @@ pub const ReplayApplier = struct {
 
 /// One borrowed plain-key PUT member serialized into a WAL batch envelope.
 ///
-/// Ownership: Borrows `key` and `value` for the duration of one `append_put_batch` call only.
+/// Ownership: Borrows `key` and `value` for the duration of one `appendPutBatch` call only.
 pub const PutBatchWrite = struct {
     key: []const u8,
     value: *const Value,
@@ -177,7 +177,7 @@ pub const Wal = struct {
         errdefer wal.close();
 
         if (wal.fsync_mode == .batched_async) {
-            wal.state.flush_thread = try std.Thread.spawn(.{}, flush_thread_main, .{wal.state});
+            wal.state.flush_thread = try std.Thread.spawn(.{}, flushThreadMain, .{wal.state});
         }
 
         return wal;
@@ -190,18 +190,18 @@ pub const Wal = struct {
     /// Allocator: Uses `self.allocator` for temporary serialization scratch.
     ///
     /// Thread Safety: Serializes with other append and close operations through the internal WAL mutex.
-    pub fn append_put(self: *Wal, key: []const u8, value: *const Value) !void {
+    pub fn appendPut(self: *Wal, key: []const u8, value: *const Value) !void {
         var scalar_buf: [9]u8 = undefined;
-        if (encode_scalar_value_inline(value, &scalar_buf)) |encoded_scalar| {
-            _ = try self.append_record(tag_put, key, encoded_scalar);
+        if (encodeScalarValueInline(value, &scalar_buf)) |encoded_scalar| {
+            _ = try self.appendRecord(tag_put, key, encoded_scalar);
             return;
         }
 
         var value_buf = std.ArrayList(u8).empty;
         defer value_buf.deinit(self.allocator);
 
-        try codec.serialize_value(self.allocator, value, &value_buf, 0);
-        _ = try self.append_record(tag_put, key, value_buf.items);
+        try codec.serializeValue(self.allocator, value, &value_buf, 0);
+        _ = try self.appendRecord(tag_put, key, value_buf.items);
     }
 
     /// Appends multiple standalone PUT records in one serialized WAL write.
@@ -213,7 +213,7 @@ pub const Wal = struct {
     /// Ownership: Borrows `writes` members for the duration of the call only.
     ///
     /// Thread Safety: Serializes with other append and close operations through the internal WAL mutex.
-    pub fn append_put_group(self: *Wal, writes: []const PutBatchWrite) !void {
+    pub fn appendPutGroup(self: *Wal, writes: []const PutBatchWrite) !void {
         if (writes.len == 0) return;
 
         var envelope = std.ArrayList(u8).empty;
@@ -227,15 +227,15 @@ pub const Wal = struct {
 
         for (writes) |write| {
             var scalar_buf: [9]u8 = undefined;
-            const encoded_value = if (encode_scalar_value_inline(write.value, &scalar_buf)) |encoded_scalar|
+            const encoded_value = if (encodeScalarValueInline(write.value, &scalar_buf)) |encoded_scalar|
                 encoded_scalar
             else blk: {
                 value_buf.clearRetainingCapacity();
-                try codec.serialize_value(self.allocator, write.value, &value_buf, 0);
+                try codec.serializeValue(self.allocator, write.value, &value_buf, 0);
                 break :blk value_buf.items;
             };
 
-            try records.append(self.allocator, try append_encoded_record_placeholder(
+            try records.append(self.allocator, try appendEncodedRecordPlaceholder(
                 self.allocator,
                 &envelope,
                 tag_put,
@@ -258,16 +258,16 @@ pub const Wal = struct {
         for (records.items) |record| {
             const lsn = self.next_lsn;
             self.next_lsn += 1;
-            patch_encoded_record(envelope.items, record, lsn);
+            patchEncodedRecord(envelope.items, record, lsn);
         }
 
         const last_lsn = self.next_lsn - 1;
-        try write_all_tracked(self.state.file, envelope.items);
+        try writeAllTracked(self.state.file, envelope.items);
         _ = self.state.bytes_written_total.fetchAdd(envelope.items.len, .monotonic);
         _ = self.state.bytes_since_compact.fetchAdd(envelope.items.len, .monotonic);
         self.state.last_appended_lsn.store(last_lsn, .release);
         self.state.dirty.store(true, .release);
-        try self.maybe_fsync_inline(last_lsn);
+        try self.maybeFsyncInline(last_lsn);
     }
 
     /// Appends a DELETE record to the WAL before a live in-memory publication.
@@ -277,8 +277,8 @@ pub const Wal = struct {
     /// Allocator: Uses `self.allocator` for the temporary encoded record.
     ///
     /// Thread Safety: Serializes with other append and close operations through the internal WAL mutex.
-    pub fn append_delete(self: *Wal, key: []const u8) !void {
-        _ = try self.append_record(tag_delete, key, "");
+    pub fn appendDelete(self: *Wal, key: []const u8) !void {
+        _ = try self.appendRecord(tag_delete, key, "");
     }
 
     /// Appends an EXPIRE record to the WAL before a live in-memory publication.
@@ -288,10 +288,10 @@ pub const Wal = struct {
     /// Allocator: Uses `self.allocator` for the temporary encoded record.
     ///
     /// Thread Safety: Serializes with other append and close operations through the internal WAL mutex.
-    pub fn append_expire(self: *Wal, key: []const u8, expire_at_sec: i64) !void {
+    pub fn appendExpire(self: *Wal, key: []const u8, expire_at_sec: i64) !void {
         var payload: [8]u8 = undefined;
         std.mem.writeInt(i64, &payload, expire_at_sec, .little);
-        _ = try self.append_record(tag_expire, key, &payload);
+        _ = try self.appendRecord(tag_expire, key, &payload);
     }
 
     /// Appends one contiguous WAL batch envelope for plain-key PUT writes.
@@ -303,7 +303,7 @@ pub const Wal = struct {
     /// Ownership: Borrows every `key` and `value` pointer for the duration of the call only.
     ///
     /// Thread Safety: Serializes with other append and close operations through the internal WAL mutex.
-    pub fn append_put_batch(self: *Wal, writes: []const PutBatchWrite) !u64 {
+    pub fn appendPutBatch(self: *Wal, writes: []const PutBatchWrite) !u64 {
         if (writes.len == 0) return error.EmptyBatch;
 
         var envelope = std.ArrayList(u8).empty;
@@ -315,7 +315,7 @@ pub const Wal = struct {
 
         var begin_payload: [batch_begin_payload_len]u8 = undefined;
         @memset(&begin_payload, 0);
-        try records.append(self.allocator, try append_encoded_record_placeholder(
+        try records.append(self.allocator, try appendEncodedRecordPlaceholder(
             self.allocator,
             &envelope,
             tag_batch_begin,
@@ -328,8 +328,8 @@ pub const Wal = struct {
 
         for (writes) |write| {
             value_buf.clearRetainingCapacity();
-            try codec.serialize_value(self.allocator, write.value, &value_buf, 0);
-            try records.append(self.allocator, try append_encoded_record_placeholder(
+            try codec.serializeValue(self.allocator, write.value, &value_buf, 0);
+            try records.append(self.allocator, try appendEncodedRecordPlaceholder(
                 self.allocator,
                 &envelope,
                 tag_put,
@@ -340,7 +340,7 @@ pub const Wal = struct {
 
         var commit_payload: [batch_commit_payload_len]u8 = undefined;
         @memset(&commit_payload, 0);
-        try records.append(self.allocator, try append_encoded_record_placeholder(
+        try records.append(self.allocator, try appendEncodedRecordPlaceholder(
             self.allocator,
             &envelope,
             tag_batch_commit,
@@ -383,16 +383,16 @@ pub const Wal = struct {
                 else => unreachable,
             }
 
-            patch_encoded_record(envelope.items, record, lsn);
+            patchEncodedRecord(envelope.items, record, lsn);
         }
 
         const commit_lsn = begin_lsn + @as(u64, @intCast(writes.len)) + 1;
-        try write_all_tracked(self.state.file, envelope.items);
+        try writeAllTracked(self.state.file, envelope.items);
         _ = self.state.bytes_written_total.fetchAdd(envelope.items.len, .monotonic);
         _ = self.state.bytes_since_compact.fetchAdd(envelope.items.len, .monotonic);
         self.state.last_appended_lsn.store(commit_lsn, .release);
         self.state.dirty.store(true, .release);
-        try self.maybe_fsync_inline(commit_lsn);
+        try self.maybeFsyncInline(commit_lsn);
         return commit_lsn;
     }
 
@@ -413,10 +413,10 @@ pub const Wal = struct {
         };
         defer std.posix.close(handle);
 
-        try perform_fsync(handle);
+        try performFsync(handle);
 
         const appended = self.state.last_appended_lsn.load(.acquire);
-        store_max_lsn(&self.state.last_fsync_lsn, appended);
+        storeMaxLsn(&self.state.last_fsync_lsn, appended);
         self.state.dirty.store(false, .release);
     }
 
@@ -432,7 +432,7 @@ pub const Wal = struct {
     /// Allocator: Uses `self.allocator` for the temporary compaction path and copied-record scratch.
     ///
     /// Thread Safety: Serializes with other append and close operations through the internal WAL mutex.
-    pub fn truncate_up_to_lsn(self: *Wal, max_lsn_inclusive: u64) !void {
+    pub fn truncateUpToLsn(self: *Wal, max_lsn_inclusive: u64) !void {
         self.state.mutex.lock();
         defer self.state.mutex.unlock();
 
@@ -440,7 +440,7 @@ pub const Wal = struct {
         if (newest_lsn <= max_lsn_inclusive) {
             try self.state.file.setEndPos(0);
             try self.state.file.seekTo(0);
-            store_max_lsn(&self.state.last_fsync_lsn, newest_lsn);
+            storeMaxLsn(&self.state.last_fsync_lsn, newest_lsn);
             self.state.dirty.store(false, .release);
             self.state.bytes_since_compact.store(0, .monotonic);
             return;
@@ -458,7 +458,7 @@ pub const Wal = struct {
         defer if (!promoted_tmp_file) tmp_file.close();
         errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
 
-        try storage_replay.compact_up_to_lsn(self.allocator, old_file, tmp_file, max_lsn_inclusive);
+        try storage_replay.compactUpToLsn(self.allocator, old_file, tmp_file, max_lsn_inclusive);
         try std.posix.fsync(tmp_file.handle);
         try tmp_file.seekFromEnd(0);
 
@@ -467,7 +467,7 @@ pub const Wal = struct {
         self.state.file = tmp_file;
         promoted_tmp_file = true;
         self.state.bytes_since_compact.store(0, .monotonic);
-        store_max_lsn(&self.state.last_fsync_lsn, newest_lsn);
+        storeMaxLsn(&self.state.last_fsync_lsn, newest_lsn);
         self.state.dirty.store(false, .release);
     }
 
@@ -478,7 +478,7 @@ pub const Wal = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Uses atomics only; safe to call while coordinating shutdown from one owner thread.
-    pub fn needs_close_fsync(self: *const Wal) bool {
+    pub fn needsCloseFsync(self: *const Wal) bool {
         if (self.fsync_mode != .batched_async) return false;
         const dirty = self.state.dirty.load(.acquire);
         const last_appended = self.state.last_appended_lsn.load(.acquire);
@@ -487,15 +487,15 @@ pub const Wal = struct {
     }
 
     /// Returns the estimated number of WAL bytes appended since the last successful
-    /// `truncate_up_to_lsn` call.
+    /// `truncateUpToLsn` call.
     ///
     /// Time Complexity: O(1).
     ///
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Reads a single atomic counter; may transiently lag a concurrent
-    /// reset from a parallel `truncate_up_to_lsn` call.
-    pub fn wal_bytes_pending(self: *const Wal) u64 {
+    /// reset from a parallel `truncateUpToLsn` call.
+    pub fn walBytesPending(self: *const Wal) u64 {
         return self.state.bytes_since_compact.load(.monotonic);
     }
 
@@ -531,11 +531,11 @@ pub const Wal = struct {
     /// Allocator: Does not allocate.
     ///
     /// Thread Safety: Must run while the caller still owns the WAL append serialization path.
-    fn maybe_fsync_inline(self: *Wal, lsn: u64) !void {
+    fn maybeFsyncInline(self: *Wal, lsn: u64) !void {
         switch (self.fsync_mode) {
             .always => {
-                try perform_fsync(self.state.file.handle);
-                store_max_lsn(&self.state.last_fsync_lsn, lsn);
+                try performFsync(self.state.file.handle);
+                storeMaxLsn(&self.state.last_fsync_lsn, lsn);
                 self.state.dirty.store(false, .release);
             },
             .none => {},
@@ -550,8 +550,8 @@ pub const Wal = struct {
     /// Allocator: Uses `self.allocator` for the temporary encoded record buffer.
     ///
     /// Thread Safety: Serializes through the WAL mutex and must not race with `close`.
-    fn append_record(self: *Wal, tag: u8, key: []const u8, value_bytes: []const u8) !u64 {
-        try validate_record_bounds(key, value_bytes);
+    fn appendRecord(self: *Wal, tag: u8, key: []const u8, value_bytes: []const u8) !u64 {
+        try validateRecordBounds(key, value_bytes);
 
         if (self.fsync_mode == .batched_async and self.state.flush_error.load(.acquire) != 0) {
             return error.WalFlushFailed;
@@ -570,42 +570,42 @@ pub const Wal = struct {
         const lsn = self.next_lsn;
         self.next_lsn += 1;
 
-        const encoded_len = encoded_record_len(key.len, value_bytes.len);
+        const encoded_len = encodedRecordLen(key.len, value_bytes.len);
         if (encoded_len <= small_record_stack_capacity) {
             var stack_record: [small_record_stack_capacity]u8 = undefined;
-            const encoded = encode_record_into(stack_record[0..], lsn, tag, key, value_bytes);
+            const encoded = encodeRecordInto(stack_record[0..], lsn, tag, key, value_bytes);
 
-            try write_all_tracked(self.state.file, encoded);
+            try writeAllTracked(self.state.file, encoded);
             _ = self.state.bytes_written_total.fetchAdd(encoded.len, .monotonic);
             _ = self.state.bytes_since_compact.fetchAdd(encoded.len, .monotonic);
             self.state.last_appended_lsn.store(lsn, .release);
             self.state.dirty.store(true, .release);
-            try self.maybe_fsync_inline(lsn);
+            try self.maybeFsyncInline(lsn);
             return lsn;
         }
 
         try buf.appendNTimes(self.allocator, 0, 4);
-        try write_u64_le(self.allocator, &buf, lsn);
+        try writeU64Le(self.allocator, &buf, lsn);
         try buf.append(self.allocator, tag);
-        try write_u16_le(self.allocator, &buf, @intCast(key.len));
+        try writeU16Le(self.allocator, &buf, @intCast(key.len));
         try buf.appendSlice(self.allocator, key);
-        try write_u32_le(self.allocator, &buf, @intCast(value_bytes.len));
+        try writeU32Le(self.allocator, &buf, @intCast(value_bytes.len));
         try buf.appendSlice(self.allocator, value_bytes);
 
         const crc = std.hash.crc.Crc32.hash(buf.items[4..]);
         std.mem.writeInt(u32, @ptrCast(buf.items[0..4]), crc, .little);
 
-        try write_all_tracked(self.state.file, buf.items);
+        try writeAllTracked(self.state.file, buf.items);
         _ = self.state.bytes_written_total.fetchAdd(buf.items.len, .monotonic);
         _ = self.state.bytes_since_compact.fetchAdd(buf.items.len, .monotonic);
         self.state.last_appended_lsn.store(lsn, .release);
         self.state.dirty.store(true, .release);
-        try self.maybe_fsync_inline(lsn);
+        try self.maybeFsyncInline(lsn);
         return lsn;
     }
 };
 
-fn encode_scalar_value_inline(value: *const Value, out: *[9]u8) ?[]const u8 {
+fn encodeScalarValueInline(value: *const Value, out: *[9]u8) ?[]const u8 {
     return switch (value.*) {
         .null_val => blk: {
             out[0] = scalar_tag_null;
@@ -630,12 +630,12 @@ fn encode_scalar_value_inline(value: *const Value, out: *[9]u8) ?[]const u8 {
     };
 }
 
-fn encoded_record_len(key_len: usize, value_len: usize) usize {
+fn encodedRecordLen(key_len: usize, value_len: usize) usize {
     return 19 + key_len + value_len;
 }
 
-fn encode_record_into(dst: []u8, lsn: u64, tag: u8, key: []const u8, value_bytes: []const u8) []u8 {
-    const len = encoded_record_len(key.len, value_bytes.len);
+fn encodeRecordInto(dst: []u8, lsn: u64, tag: u8, key: []const u8, value_bytes: []const u8) []u8 {
+    const len = encodedRecordLen(key.len, value_bytes.len);
     std.debug.assert(dst.len >= len);
 
     var cursor: usize = 4;
@@ -687,12 +687,12 @@ pub fn open(
 /// Allocator: Does not allocate.
 ///
 /// Thread Safety: Coordinates only through `FlushState` atomics and the WAL mutex.
-fn flush_thread_main(state: *FlushState) void {
+fn flushThreadMain(state: *FlushState) void {
     const interval_ns = @max(@as(u64, state.fsync_interval_ms), 1) * std.time.ns_per_ms;
     while (!state.stop_flush_thread.load(.acquire)) {
         std.Thread.sleep(interval_ns);
         if (state.stop_flush_thread.load(.acquire)) break;
-        flush_once(state) catch {};
+        flushOnce(state) catch {};
     }
 }
 
@@ -703,7 +703,7 @@ fn flush_thread_main(state: *FlushState) void {
 /// Allocator: Does not allocate.
 ///
 /// Thread Safety: Uses the WAL mutex to snapshot the target file descriptor and LSN before fsyncing without the mutex held.
-fn flush_once(state: *FlushState) !void {
+fn flushOnce(state: *FlushState) !void {
     const snapshot = blk: {
         state.mutex.lock();
         errdefer state.mutex.unlock();
@@ -721,13 +721,13 @@ fn flush_once(state: *FlushState) !void {
     };
     defer std.posix.close(snapshot.dup_fd);
 
-    perform_fsync(snapshot.dup_fd) catch |err| {
+    performFsync(snapshot.dup_fd) catch |err| {
         state.flush_error.store(1, .release);
         state.dirty.store(true, .release);
         return err;
     };
 
-    store_max_lsn(&state.last_fsync_lsn, snapshot.target_lsn);
+    storeMaxLsn(&state.last_fsync_lsn, snapshot.target_lsn);
 }
 
 /// Raises one atomic LSN watermark when `candidate` is newer.
@@ -737,7 +737,7 @@ fn flush_once(state: *FlushState) !void {
 /// Allocator: Does not allocate.
 ///
 /// Thread Safety: Lock-free atomic update safe for concurrent publishers.
-fn store_max_lsn(dst: *std.atomic.Value(u64), candidate: u64) void {
+fn storeMaxLsn(dst: *std.atomic.Value(u64), candidate: u64) void {
     var current = dst.load(.acquire);
     while (candidate > current) {
         if (dst.cmpxchgWeak(current, candidate, .acq_rel, .acquire)) |actual| {
@@ -755,14 +755,14 @@ fn store_max_lsn(dst: *std.atomic.Value(u64), candidate: u64) void {
 /// Allocator: Uses `allocator` to grow `buf`.
 ///
 /// Ownership: Borrows `key` and `value_bytes` for the duration of the append only.
-fn append_encoded_record_placeholder(
+fn appendEncodedRecordPlaceholder(
     allocator: std.mem.Allocator,
     buf: *std.ArrayList(u8),
     tag: u8,
     key: []const u8,
     value_bytes: []const u8,
 ) !EncodedAppendRecord {
-    try validate_record_bounds_for_tag(tag, key, value_bytes);
+    try validateRecordBoundsForTag(tag, key, value_bytes);
 
     const start_offset = buf.items.len;
     try buf.appendNTimes(allocator, 0, 4);
@@ -770,9 +770,9 @@ fn append_encoded_record_placeholder(
     const lsn_offset = buf.items.len;
     try buf.appendNTimes(allocator, 0, 8);
     try buf.append(allocator, tag);
-    try write_u16_le(allocator, buf, @intCast(key.len));
+    try writeU16Le(allocator, buf, @intCast(key.len));
     try buf.appendSlice(allocator, key);
-    try write_u32_le(allocator, buf, @intCast(value_bytes.len));
+    try writeU32Le(allocator, buf, @intCast(value_bytes.len));
 
     const value_offset = buf.items.len;
     try buf.appendSlice(allocator, value_bytes);
@@ -791,7 +791,7 @@ fn append_encoded_record_placeholder(
 /// Time Complexity: O(r), where `r` is the encoded record length.
 ///
 /// Allocator: Does not allocate.
-fn patch_encoded_record(buf: []u8, record: EncodedAppendRecord, lsn: u64) void {
+fn patchEncodedRecord(buf: []u8, record: EncodedAppendRecord, lsn: u64) void {
     std.mem.writeInt(u64, @ptrCast(buf[record.lsn_offset .. record.lsn_offset + 8]), lsn, .little);
     const crc = std.hash.crc.Crc32.hash(buf[record.start_offset + 4 .. record.end_offset]);
     std.mem.writeInt(u32, @ptrCast(buf[record.start_offset .. record.start_offset + 4]), crc, .little);
@@ -802,7 +802,7 @@ fn patch_encoded_record(buf: []u8, record: EncodedAppendRecord, lsn: u64) void {
 /// Time Complexity: O(1) amortized, excluding buffer growth.
 ///
 /// Allocator: Uses `allocator` only if `buf` must grow.
-fn write_u16_le(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), value: u16) !void {
+fn writeU16Le(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), value: u16) !void {
     var tmp: [2]u8 = undefined;
     std.mem.writeInt(u16, &tmp, value, .little);
     try buf.appendSlice(allocator, &tmp);
@@ -813,7 +813,7 @@ fn write_u16_le(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), value: u1
 /// Time Complexity: O(1) amortized, excluding buffer growth.
 ///
 /// Allocator: Uses `allocator` only if `buf` must grow.
-fn write_u32_le(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), value: u32) !void {
+fn writeU32Le(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), value: u32) !void {
     var tmp: [4]u8 = undefined;
     std.mem.writeInt(u32, &tmp, value, .little);
     try buf.appendSlice(allocator, &tmp);
@@ -824,24 +824,24 @@ fn write_u32_le(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), value: u3
 /// Time Complexity: O(1) amortized, excluding buffer growth.
 ///
 /// Allocator: Uses `allocator` only if `buf` must grow.
-fn write_u64_le(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), value: u64) !void {
+fn writeU64Le(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), value: u64) !void {
     var tmp: [8]u8 = undefined;
     std.mem.writeInt(u64, &tmp, value, .little);
     try buf.appendSlice(allocator, &tmp);
 }
 
-fn validate_record_bounds(key: []const u8, value_bytes: []const u8) !void {
+fn validateRecordBounds(key: []const u8, value_bytes: []const u8) !void {
     if (key.len == 0 or key.len > MAX_KEY_LEN) return error.KeyTooLarge;
     if (value_bytes.len > MAX_VAL_LEN) return error.ValueTooLarge;
 }
 
-fn validate_record_bounds_for_tag(tag: u8, key: []const u8, value_bytes: []const u8) !void {
+fn validateRecordBoundsForTag(tag: u8, key: []const u8, value_bytes: []const u8) !void {
     if (tag == tag_batch_begin or tag == tag_batch_commit) {
         if (key.len != 0) return error.KeyTooLarge;
         if (value_bytes.len > MAX_VAL_LEN) return error.ValueTooLarge;
         return;
     }
-    try validate_record_bounds(key, value_bytes);
+    try validateRecordBounds(key, value_bytes);
 }
 
 var g_fail_next_write = std.atomic.Value(bool).init(false);
@@ -854,7 +854,7 @@ var g_fail_next_fsync = std.atomic.Value(bool).init(false);
 /// Allocator: Does not allocate.
 ///
 /// Ownership: Borrows `bytes` for the duration of the write only.
-fn write_all_tracked(file: std.fs.File, bytes: []const u8) !void {
+fn writeAllTracked(file: std.fs.File, bytes: []const u8) !void {
     if (builtin.is_test and g_fail_next_write.swap(false, .acq_rel)) {
         return error.SimulatedWriteFailure;
     }
@@ -866,7 +866,7 @@ fn write_all_tracked(file: std.fs.File, bytes: []const u8) !void {
 /// Time Complexity: O(1) CPU work plus filesystem-dependent fsync latency.
 ///
 /// Allocator: Does not allocate.
-fn perform_fsync(fd: std.posix.fd_t) !void {
+fn performFsync(fd: std.posix.fd_t) !void {
     if (builtin.is_test and g_fail_next_fsync.swap(false, .acq_rel)) {
         return error.SimulatedFsyncFailure;
     }
@@ -907,7 +907,7 @@ pub const test_hooks = if (builtin.is_test) struct {
 /// Allocator: Allocates the returned byte slice with `allocator`.
 ///
 /// Ownership: Caller owns the returned slice.
-fn read_all_test(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+fn readAllTest(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
     return try file.readToEndAlloc(allocator, 1 << 20);
@@ -920,7 +920,7 @@ fn read_all_test(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 /// Allocator: Allocates the returned tag slice with `allocator`.
 ///
 /// Ownership: Caller owns the returned slice.
-fn collect_record_tags_test(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+fn collectRecordTagsTest(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     var tags = std.ArrayList(u8).empty;
     errdefer tags.deinit(allocator);
 
@@ -946,7 +946,7 @@ fn collect_record_tags_test(allocator: std.mem.Allocator, bytes: []const u8) ![]
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-fn noop_put(ctx: *anyopaque, key: []const u8, value: *const Value) !void {
+fn noopPut(ctx: *anyopaque, key: []const u8, value: *const Value) !void {
     _ = ctx;
     _ = key;
     _ = value;
@@ -957,7 +957,7 @@ fn noop_put(ctx: *anyopaque, key: []const u8, value: *const Value) !void {
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-fn noop_delete(ctx: *anyopaque, key: []const u8) !void {
+fn noopDelete(ctx: *anyopaque, key: []const u8) !void {
     _ = ctx;
     _ = key;
 }
@@ -967,7 +967,7 @@ fn noop_delete(ctx: *anyopaque, key: []const u8) !void {
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-fn noop_expire(ctx: *anyopaque, key: []const u8, expire_at_sec: i64) !void {
+fn noopExpire(ctx: *anyopaque, key: []const u8, expire_at_sec: i64) !void {
     _ = ctx;
     _ = key;
     _ = expire_at_sec;
@@ -980,12 +980,12 @@ fn noop_expire(ctx: *anyopaque, key: []const u8, expire_at_sec: i64) !void {
 /// Allocator: Does not allocate.
 ///
 /// Ownership: Returns borrowed callback pointers only.
-fn noop_applier() ReplayApplier {
+fn noopApplier() ReplayApplier {
     return .{
         .ctx = undefined,
-        .put = noop_put,
-        .delete = noop_delete,
-        .expire = noop_expire,
+        .put = noopPut,
+        .delete = noopDelete,
+        .expire = noopExpire,
     };
 }
 
@@ -996,7 +996,7 @@ const ReplayEventKind = enum { put, delete, expire };
 const ReplayEvent = struct {
     kind: ReplayEventKind,
     key: []u8,
-    expire_at: i64 = 0,
+    expireAt: i64 = 0,
 };
 
 /// Captures replay callbacks into owned test events.
@@ -1039,9 +1039,9 @@ const ReplayCollector = struct {
     fn applier(self: *ReplayCollector) ReplayApplier {
         return .{
             .ctx = self,
-            .put = replay_collector_put,
-            .delete = replay_collector_delete,
-            .expire = replay_collector_expire,
+            .put = replayCollectorPut,
+            .delete = replayCollectorDelete,
+            .expire = replayCollectorExpire,
         };
     }
 };
@@ -1051,7 +1051,7 @@ const ReplayCollector = struct {
 /// Time Complexity: O(k), where `k` is `key.len`.
 ///
 /// Allocator: Duplicates `key` with the collector allocator.
-fn replay_collector_put(ctx: *anyopaque, key: []const u8, value: *const Value) !void {
+fn replayCollectorPut(ctx: *anyopaque, key: []const u8, value: *const Value) !void {
     _ = value;
     const collector: *ReplayCollector = @ptrCast(@alignCast(ctx));
     try collector.events.append(collector.allocator, .{
@@ -1065,7 +1065,7 @@ fn replay_collector_put(ctx: *anyopaque, key: []const u8, value: *const Value) !
 /// Time Complexity: O(k), where `k` is `key.len`.
 ///
 /// Allocator: Duplicates `key` with the collector allocator.
-fn replay_collector_delete(ctx: *anyopaque, key: []const u8) !void {
+fn replayCollectorDelete(ctx: *anyopaque, key: []const u8) !void {
     const collector: *ReplayCollector = @ptrCast(@alignCast(ctx));
     try collector.events.append(collector.allocator, .{
         .kind = .delete,
@@ -1078,12 +1078,12 @@ fn replay_collector_delete(ctx: *anyopaque, key: []const u8) !void {
 /// Time Complexity: O(k), where `k` is `key.len`.
 ///
 /// Allocator: Duplicates `key` with the collector allocator.
-fn replay_collector_expire(ctx: *anyopaque, key: []const u8, expire_at_sec: i64) !void {
+fn replayCollectorExpire(ctx: *anyopaque, key: []const u8, expire_at_sec: i64) !void {
     const collector: *ReplayCollector = @ptrCast(@alignCast(ctx));
     try collector.events.append(collector.allocator, .{
         .kind = .expire,
         .key = try collector.allocator.dupe(u8, key),
-        .expire_at = expire_at_sec,
+        .expireAt = expire_at_sec,
     });
 }
 
@@ -1094,7 +1094,7 @@ fn replay_collector_expire(ctx: *anyopaque, key: []const u8, expire_at_sec: i64)
 /// Allocator: Uses `allocator` for the temporary encoded record buffer.
 ///
 /// Ownership: Borrows `key` and `value_bytes` for the duration of the call only.
-fn write_crafted_record_test(
+fn writeCraftedRecordTest(
     allocator: std.mem.Allocator,
     file: std.fs.File,
     lsn: u64,
@@ -1106,11 +1106,11 @@ fn write_crafted_record_test(
     defer buf.deinit(allocator);
 
     try buf.appendNTimes(allocator, 0, 4);
-    try write_u64_le(allocator, &buf, lsn);
+    try writeU64Le(allocator, &buf, lsn);
     try buf.append(allocator, tag);
-    try write_u16_le(allocator, &buf, @intCast(key.len));
+    try writeU16Le(allocator, &buf, @intCast(key.len));
     try buf.appendSlice(allocator, key);
-    try write_u32_le(allocator, &buf, @intCast(value_bytes.len));
+    try writeU32Le(allocator, &buf, @intCast(value_bytes.len));
     try buf.appendSlice(allocator, value_bytes);
 
     const crc = std.hash.crc.Crc32.hash(buf.items[4..]);
@@ -1118,7 +1118,7 @@ fn write_crafted_record_test(
     try file.writeAll(buf.items);
 }
 
-fn alloc_tmp_path_test(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, basename: []const u8) ![]u8 {
+fn allocTmpPathTest(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, basename: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, basename });
 }
 
@@ -1128,10 +1128,10 @@ test "open succeeds for a new empty wal file" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step6-empty.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step6-empty.wal");
     defer testing.allocator.free(path);
 
-    var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+    var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
     defer wal.close();
 }
 
@@ -1141,17 +1141,17 @@ test "replay restores standalone put delete and expire records" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-replay-standalone.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step7-replay-standalone.wal");
     defer testing.allocator.free(path);
 
     {
-        var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+        var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
         defer wal.close();
 
         const value = Value{ .string = "hello" };
-        try wal.append_put("alpha", &value);
-        try wal.append_delete("beta");
-        try wal.append_expire("gamma", 123);
+        try wal.appendPut("alpha", &value);
+        try wal.appendDelete("beta");
+        try wal.appendExpire("gamma", 123);
     }
 
     const replay_file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
@@ -1170,7 +1170,7 @@ test "replay restores standalone put delete and expire records" {
     try testing.expectEqualStrings("beta", collector.events.items[1].key);
     try testing.expectEqual(ReplayEventKind.expire, collector.events.items[2].kind);
     try testing.expectEqualStrings("gamma", collector.events.items[2].key);
-    try testing.expectEqual(@as(i64, 123), collector.events.items[2].expire_at);
+    try testing.expectEqual(@as(i64, 123), collector.events.items[2].expireAt);
 }
 
 test "append point records writes put delete and expire tags" {
@@ -1179,22 +1179,22 @@ test "append point records writes put delete and expire tags" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step6-point-records.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step6-point-records.wal");
     defer testing.allocator.free(path);
 
-    var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+    var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
     defer wal.close();
 
     const value = Value{ .string = "hello" };
-    try wal.append_put("alpha", &value);
-    try wal.append_delete("alpha");
-    try wal.append_expire("beta", 123);
+    try wal.appendPut("alpha", &value);
+    try wal.appendDelete("alpha");
+    try wal.appendExpire("beta", 123);
     try wal.fsync();
 
-    const bytes = try read_all_test(testing.allocator, path);
+    const bytes = try readAllTest(testing.allocator, path);
     defer testing.allocator.free(bytes);
 
-    const tags = try collect_record_tags_test(testing.allocator, bytes);
+    const tags = try collectRecordTagsTest(testing.allocator, bytes);
     defer testing.allocator.free(tags);
 
     try testing.expectEqualSlices(u8, &.{ tag_put, tag_delete, tag_expire }, tags);
@@ -1206,17 +1206,17 @@ test "append_put_group writes standalone put records in order" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step6-group-puts.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step6-group-puts.wal");
     defer testing.allocator.free(path);
 
     {
-        var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+        var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
         defer wal.close();
 
         const one = Value{ .integer = 1 };
         const two = Value{ .string = "hello" };
         const three = Value{ .boolean = true };
-        try wal.append_put_group(&.{
+        try wal.appendPutGroup(&.{
             .{ .key = "alpha", .value = &one },
             .{ .key = "beta", .value = &two },
             .{ .key = "gamma", .value = &three },
@@ -1237,10 +1237,10 @@ test "append_put_group writes standalone put records in order" {
     try testing.expectEqualStrings("beta", collector.events.items[1].key);
     try testing.expectEqualStrings("gamma", collector.events.items[2].key);
 
-    const bytes = try read_all_test(testing.allocator, path);
+    const bytes = try readAllTest(testing.allocator, path);
     defer testing.allocator.free(bytes);
 
-    const tags = try collect_record_tags_test(testing.allocator, bytes);
+    const tags = try collectRecordTagsTest(testing.allocator, bytes);
     defer testing.allocator.free(tags);
     try testing.expectEqualSlices(u8, &.{ tag_put, tag_put, tag_put }, tags);
 }
@@ -1251,16 +1251,16 @@ test "replay restores committed put batch atomically and in order" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-batch-replay.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step7-batch-replay.wal");
     defer testing.allocator.free(path);
 
     {
-        var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+        var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
         defer wal.close();
 
         const one = Value{ .integer = 1 };
         const two = Value{ .integer = 2 };
-        _ = try wal.append_put_batch(&.{
+        _ = try wal.appendPutBatch(&.{
             .{ .key = "alpha", .value = &one },
             .{ .key = "beta", .value = &two },
         });
@@ -1286,16 +1286,16 @@ test "replay truncates incomplete batch tails safely" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-incomplete-tail.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step7-incomplete-tail.wal");
     defer testing.allocator.free(path);
 
     {
-        var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+        var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
         defer wal.close();
 
         const one = Value{ .integer = 1 };
         const two = Value{ .integer = 2 };
-        _ = try wal.append_put_batch(&.{
+        _ = try wal.appendPutBatch(&.{
             .{ .key = "alpha", .value = &one },
             .{ .key = "beta", .value = &two },
         });
@@ -1327,18 +1327,18 @@ test "replay truncates corrupt crc tails safely" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-corrupt-tail.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step7-corrupt-tail.wal");
     defer testing.allocator.free(path);
 
     var second_start: u64 = 0;
     {
-        var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+        var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
         defer wal.close();
 
         const value = Value{ .string = "hello" };
-        try wal.append_put("alpha", &value);
+        try wal.appendPut("alpha", &value);
         second_start = try wal.state.file.getEndPos();
-        try wal.append_delete("beta");
+        try wal.appendDelete("beta");
     }
 
     {
@@ -1372,7 +1372,7 @@ test "replay truncates invalid batch structures from the matching begin" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-invalid-batch.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step7-invalid-batch.wal");
     defer testing.allocator.free(path);
 
     if (std.fs.path.dirname(path)) |dir_path| {
@@ -1383,7 +1383,7 @@ test "replay truncates invalid batch structures from the matching begin" {
 
     var put_buf = std.ArrayList(u8).empty;
     defer put_buf.deinit(testing.allocator);
-    try codec.serialize_value(testing.allocator, &Value{ .integer = 1 }, &put_buf, 0);
+    try codec.serializeValue(testing.allocator, &Value{ .integer = 1 }, &put_buf, 0);
 
     var begin_payload: [batch_begin_payload_len]u8 = undefined;
     std.mem.writeInt(u32, &begin_payload, 1, .little);
@@ -1392,11 +1392,11 @@ test "replay truncates invalid batch structures from the matching begin" {
     std.mem.writeInt(u64, @ptrCast(commit_payload[0..8]), 999, .little);
     std.mem.writeInt(u32, @ptrCast(commit_payload[8..12]), 1, .little);
 
-    try write_crafted_record_test(testing.allocator, file, 1, tag_put, "seed", put_buf.items);
+    try writeCraftedRecordTest(testing.allocator, file, 1, tag_put, "seed", put_buf.items);
     const batch_begin_offset = try file.getEndPos();
-    try write_crafted_record_test(testing.allocator, file, 2, tag_batch_begin, "", &begin_payload);
-    try write_crafted_record_test(testing.allocator, file, 3, tag_put, "alpha", put_buf.items);
-    try write_crafted_record_test(testing.allocator, file, 4, tag_batch_commit, "", &commit_payload);
+    try writeCraftedRecordTest(testing.allocator, file, 2, tag_batch_begin, "", &begin_payload);
+    try writeCraftedRecordTest(testing.allocator, file, 3, tag_put, "alpha", put_buf.items);
+    try writeCraftedRecordTest(testing.allocator, file, 4, tag_batch_commit, "", &commit_payload);
 
     const replay_file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
     defer replay_file.close();
@@ -1418,18 +1418,18 @@ test "replay honors min_lsn for standalone records and whole batches" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-min-lsn.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step7-min-lsn.wal");
     defer testing.allocator.free(path);
 
     {
-        var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+        var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
         defer wal.close();
 
         const one = Value{ .integer = 1 };
         const two = Value{ .integer = 2 };
         const three = Value{ .integer = 3 };
-        try wal.append_put("alpha", &one);
-        _ = try wal.append_put_batch(&.{
+        try wal.appendPut("alpha", &one);
+        _ = try wal.appendPutBatch(&.{
             .{ .key = "beta", .value = &two },
             .{ .key = "gamma", .value = &three },
         });
@@ -1470,15 +1470,15 @@ test "open on a non-empty wal replays and advances next_lsn" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-open-replay.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step7-open-replay.wal");
     defer testing.allocator.free(path);
 
     {
-        var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+        var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
         defer wal.close();
 
         const value = Value{ .integer = 1 };
-        try wal.append_put("alpha", &value);
+        try wal.appendPut("alpha", &value);
     }
 
     var collector = ReplayCollector.init(testing.allocator);
@@ -1498,15 +1498,15 @@ test "fsync failure propagates from always mode append" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-fsync-failure.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step7-fsync-failure.wal");
     defer testing.allocator.free(path);
 
-    var wal = try open(path, .{ .fsync_mode = .always }, noop_applier(), testing.allocator);
+    var wal = try open(path, .{ .fsync_mode = .always }, noopApplier(), testing.allocator);
     defer wal.close();
 
     const value = Value{ .integer = 1 };
     test_hooks.failNextFsync();
-    try testing.expectError(error.SimulatedFsyncFailure, wal.append_put("alpha", &value));
+    try testing.expectError(error.SimulatedFsyncFailure, wal.appendPut("alpha", &value));
 }
 
 test "truncate_up_to_lsn drops standalone records at or below the cutoff" {
@@ -1515,18 +1515,18 @@ test "truncate_up_to_lsn drops standalone records at or below the cutoff" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-compact-standalone.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step7-compact-standalone.wal");
     defer testing.allocator.free(path);
 
     {
-        var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+        var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
         defer wal.close();
 
         const one = Value{ .integer = 1 };
         const two = Value{ .integer = 2 };
-        try wal.append_put("alpha", &one);
-        try wal.append_put("beta", &two);
-        try wal.truncate_up_to_lsn(1);
+        try wal.appendPut("alpha", &one);
+        try wal.appendPut("beta", &two);
+        try wal.truncateUpToLsn(1);
     }
 
     const replay_file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
@@ -1548,22 +1548,22 @@ test "truncate_up_to_lsn keeps committed batches by commit lsn" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-compact-batch.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step7-compact-batch.wal");
     defer testing.allocator.free(path);
 
     {
-        var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+        var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
         defer wal.close();
 
         const one = Value{ .integer = 1 };
         const two = Value{ .integer = 2 };
         const three = Value{ .integer = 3 };
-        _ = try wal.append_put_batch(&.{
+        _ = try wal.appendPutBatch(&.{
             .{ .key = "alpha", .value = &one },
             .{ .key = "beta", .value = &two },
         });
-        try wal.append_put("gamma", &three);
-        try wal.truncate_up_to_lsn(4);
+        try wal.appendPut("gamma", &three);
+        try wal.truncateUpToLsn(4);
     }
 
     const replay_file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
@@ -1578,7 +1578,7 @@ test "truncate_up_to_lsn keeps committed batches by commit lsn" {
     try testing.expectEqual(@as(usize, 1), collector.events.items.len);
     try testing.expectEqualStrings("gamma", collector.events.items[0].key);
 
-    var reopened = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+    var reopened = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
     defer reopened.close();
     try testing.expectEqual(@as(u64, 6), reopened.next_lsn);
 }
@@ -1589,16 +1589,16 @@ test "truncate_up_to_lsn drops incomplete trailing batches instead of retaining 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step7-compact-invalid-tail.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step7-compact-invalid-tail.wal");
     defer testing.allocator.free(path);
 
     {
-        var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+        var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
         defer wal.close();
 
         const one = Value{ .integer = 1 };
         const two = Value{ .integer = 2 };
-        _ = try wal.append_put_batch(&.{
+        _ = try wal.appendPutBatch(&.{
             .{ .key = "alpha", .value = &one },
             .{ .key = "beta", .value = &two },
         });
@@ -1612,9 +1612,9 @@ test "truncate_up_to_lsn drops incomplete trailing batches instead of retaining 
     }
 
     {
-        var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+        var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
         defer wal.close();
-        try wal.truncate_up_to_lsn(0);
+        try wal.truncateUpToLsn(0);
     }
 
     const replay_file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
@@ -1635,10 +1635,10 @@ test "append_put rejects oversized keys and values before writing records" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step12-oversized.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step12-oversized.wal");
     defer testing.allocator.free(path);
 
-    var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+    var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
     defer wal.close();
 
     const oversized_key = try testing.allocator.alloc(u8, codec.MAX_KEY_LEN + 1);
@@ -1650,8 +1650,8 @@ test "append_put rejects oversized keys and values before writing records" {
     @memset(oversized_value_bytes, 'v');
     const oversized_value = Value{ .string = oversized_value_bytes };
 
-    try testing.expectError(error.KeyTooLarge, wal.append_put(oversized_key, &Value{ .integer = 1 }));
-    try testing.expectError(error.ValueTooLarge, wal.append_put("value:too:large", &oversized_value));
+    try testing.expectError(error.KeyTooLarge, wal.appendPut(oversized_key, &Value{ .integer = 1 }));
+    try testing.expectError(error.ValueTooLarge, wal.appendPut("value:too:large", &oversized_value));
 }
 
 test "replay decodes allocated string and object values for put records" {
@@ -1660,11 +1660,11 @@ test "replay decodes allocated string and object values for put records" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step12-allocated-values.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step12-allocated-values.wal");
     defer testing.allocator.free(path);
 
     {
-        var wal = try open(path, .{ .fsync_mode = .none }, noop_applier(), testing.allocator);
+        var wal = try open(path, .{ .fsync_mode = .none }, noopApplier(), testing.allocator);
         defer wal.close();
 
         var object = std.StringHashMapUnmanaged(Value){};
@@ -1680,8 +1680,8 @@ test "replay decodes allocated string and object values for put records" {
 
         const string_value = Value{ .string = "hello" };
         const object_value = Value{ .object = object };
-        try wal.append_put("alpha", &string_value);
-        try wal.append_put("beta", &object_value);
+        try wal.appendPut("alpha", &string_value);
+        try wal.appendPut("beta", &object_value);
     }
 
     const Collector = struct {
@@ -1742,7 +1742,7 @@ test "replay truncates standalone records with partial key payloads safely" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step12-partial-key.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step12-partial-key.wal");
     defer testing.allocator.free(path);
 
     {
@@ -1751,7 +1751,7 @@ test "replay truncates standalone records with partial key payloads safely" {
         }
         const file = try std.fs.cwd().createFile(path, .{ .read = true, .truncate = true });
         defer file.close();
-        try write_crafted_record_test(testing.allocator, file, 1, tag_delete, "alpha", "");
+        try writeCraftedRecordTest(testing.allocator, file, 1, tag_delete, "alpha", "");
         try file.setEndPos(4 + 8 + 1 + 2 + 3);
     }
 
@@ -1774,12 +1774,12 @@ test "replay truncates standalone records with partial value payloads safely" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "step12-partial-value.wal");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "step12-partial-value.wal");
     defer testing.allocator.free(path);
 
     var value_buf = std.ArrayList(u8).empty;
     defer value_buf.deinit(testing.allocator);
-    try codec.serialize_value(testing.allocator, &Value{ .string = "hello" }, &value_buf, 0);
+    try codec.serializeValue(testing.allocator, &Value{ .string = "hello" }, &value_buf, 0);
 
     {
         if (std.fs.path.dirname(path)) |dir_path| {
@@ -1787,7 +1787,7 @@ test "replay truncates standalone records with partial value payloads safely" {
         }
         const file = try std.fs.cwd().createFile(path, .{ .read = true, .truncate = true });
         defer file.close();
-        try write_crafted_record_test(testing.allocator, file, 1, tag_put, "alpha", value_buf.items);
+        try writeCraftedRecordTest(testing.allocator, file, 1, tag_put, "alpha", value_buf.items);
         const size = try file.getEndPos();
         try file.setEndPos(size - 1);
     }

@@ -20,7 +20,7 @@ const types = @import("../types.zig");
 /// Ownership: Returns a value owned by the caller when non-null. The caller must later call `deinit` with the same allocator.
 ///
 /// Thread Safety: Requires a surrounding visibility window and acquires the selected shard's shared lock while reading and cloning the stored value.
-fn clone_plain_value_no_visibility(
+fn clonePlainValueNoVisibility(
     state: *const runtime_state.DatabaseState,
     shard: *runtime_shard.Shard,
     allocator: std.mem.Allocator,
@@ -46,9 +46,9 @@ fn clone_plain_value_no_visibility(
         const value_ptr = stored orelse return null;
 
         if (shard.has_ttl_entries) {
-            const stored_expire_at = internal_ttl_index.get_expire_at(shard, key) orelse return try value_ptr.clone(allocator);
-            const now = runtime_shard.unix_now();
-            if (expiration.is_expired(stored_expire_at, now)) return null;
+            const stored_expire_at = internal_ttl_index.getExpireAt(shard, key) orelse return try value_ptr.clone(allocator);
+            const now = runtime_shard.unixNow();
+            if (expiration.isExpired(stored_expire_at, now)) return null;
         }
 
         return try value_ptr.clone(allocator);
@@ -63,7 +63,7 @@ fn clone_plain_value_no_visibility(
 ///
 /// Thread Safety: Requires a surrounding visibility window and acquires the selected
 /// shard's shared lock while reading.
-fn check_key_exists_no_visibility(
+fn checkKeyExistsNoVisibility(
     state: *const runtime_state.DatabaseState,
     shard: *runtime_shard.Shard,
     key: []const u8,
@@ -88,9 +88,9 @@ fn check_key_exists_no_visibility(
         if (stored == null) return false;
 
         if (shard.has_ttl_entries) {
-            const stored_expire_at = internal_ttl_index.get_expire_at(shard, key) orelse return true;
-            const now = runtime_shard.unix_now();
-            if (expiration.is_expired(stored_expire_at, now)) return false;
+            const stored_expire_at = internal_ttl_index.getExpireAt(shard, key) orelse return true;
+            const now = runtime_shard.unixNow();
+            if (expiration.isExpired(stored_expire_at, now)) return false;
         }
 
         return true;
@@ -106,15 +106,15 @@ fn check_key_exists_no_visibility(
 /// Ownership: Returns a handle that borrows the runtime state and visibility gates until `deinit` is called.
 ///
 /// Thread Safety: Acquires the shared side of all shard-local visibility gates and keeps them held for the lifetime of the returned `ReadView`.
-pub fn read_view(state: *const runtime_state.DatabaseState) error_mod.EngineError!types.ReadView {
-    state.lock_all_shards_shared();
+pub fn readView(state: *const runtime_state.DatabaseState) error_mod.EngineError!types.ReadView {
+    state.lockAllShardsShared();
 
     return types.ReadView.init(
         state,
         @constCast(&state.active_read_views),
-        runtime_shard.unix_now(),
+        runtime_shard.unixNow(),
     ) catch {
-        state.unlock_all_shards_shared();
+        state.unlockAllShardsShared();
         return error.OutOfMemory;
     };
 }
@@ -127,17 +127,17 @@ pub fn read_view(state: *const runtime_state.DatabaseState) error_mod.EngineErro
 ///
 /// Ownership: Returns a value owned by the caller when non-null. The caller must later call `deinit` with the same allocator.
 ///
-/// Thread Safety: Acquires only the selected shard's shared lock through `clone_plain_value_no_visibility`.
+/// Thread Safety: Acquires only the selected shard's shared lock through `clonePlainValueNoVisibility`.
 pub fn get(state: *const runtime_state.DatabaseState, allocator: std.mem.Allocator, key: []const u8) error_mod.EngineError!?types.Value {
-    internal_mutate.validate_key(key) catch |err| switch (err) {
+    internal_mutate.validateKey(key) catch |err| switch (err) {
         error.EmptyKey, error.KeyTooLarge => return error.KeyTooLarge,
     };
 
-    const shard_idx = runtime_shard.get_shard_index(key);
+    const shard_idx = runtime_shard.getShardIndex(key);
     const shard = @constCast(&state.shards[shard_idx]);
 
-    const value = try clone_plain_value_no_visibility(state, shard, allocator, key);
-    state.record_operation(.get, 1);
+    const value = try clonePlainValueNoVisibility(state, shard, allocator, key);
+    state.recordOperation(.get, 1);
     return value;
 }
 
@@ -150,15 +150,15 @@ pub fn get(state: *const runtime_state.DatabaseState, allocator: std.mem.Allocat
 /// Thread Safety: Lock-free via the shard seqlock; safe for concurrent use with
 /// point writes and scans.
 pub fn exists(state: *const runtime_state.DatabaseState, key: []const u8) error_mod.EngineError!bool {
-    internal_mutate.validate_key(key) catch |err| switch (err) {
+    internal_mutate.validateKey(key) catch |err| switch (err) {
         error.EmptyKey, error.KeyTooLarge => return error.KeyTooLarge,
     };
 
-    const shard_idx = runtime_shard.get_shard_index(key);
+    const shard_idx = runtime_shard.getShardIndex(key);
     const shard = @constCast(&state.shards[shard_idx]);
 
-    const found = check_key_exists_no_visibility(state, shard, key);
-    state.record_operation(.get, 1);
+    const found = checkKeyExistsNoVisibility(state, shard, key);
+    state.recordOperation(.get, 1);
     return found;
 }
 
@@ -188,7 +188,7 @@ pub fn getMany(
 
     // Validate all keys before allocating anything
     for (keys) |key| {
-        internal_mutate.validate_key(key) catch |err| switch (err) {
+        internal_mutate.validateKey(key) catch |err| switch (err) {
             error.EmptyKey, error.KeyTooLarge => return error.KeyTooLarge,
         };
     }
@@ -198,7 +198,7 @@ pub fn getMany(
     @memset(values, null);
 
     if (keys.len == 0) {
-        state.record_operation(.get, 0);
+        state.recordOperation(.get, 0);
         return .{ .values = values };
     }
 
@@ -220,7 +220,7 @@ pub fn getMany(
     // Count keys per shard
     var shard_counts = [_]u32{0} ** runtime_state.NUM_SHARDS;
     for (keys) |key| {
-        shard_counts[runtime_shard.get_shard_index(key)] += 1;
+        shard_counts[runtime_shard.getShardIndex(key)] += 1;
     }
 
     // Prefix sums, bucket start positions
@@ -234,7 +234,7 @@ pub fn getMany(
     // Fill key_order — place each key's original index into its shard bucket
     var cursors = shard_starts;
     for (keys, 0..) |key, i| {
-        const s = runtime_shard.get_shard_index(key);
+        const s = runtime_shard.getShardIndex(key);
         key_order[cursors[s]] = i;
         cursors[s] += 1;
     }
@@ -248,7 +248,7 @@ pub fn getMany(
         const end = start + shard_counts[shard_idx];
 
         for (key_order[start..end]) |original_idx| {
-            values[original_idx] = try clone_plain_value_no_visibility(
+            values[original_idx] = try clonePlainValueNoVisibility(
                 state,
                 shard,
                 allocator,
@@ -259,6 +259,6 @@ pub fn getMany(
         }
     }
 
-    state.record_operation(.get, @intCast(keys.len));
+    state.recordOperation(.get, @intCast(keys.len));
     return .{ .values = values };
 }

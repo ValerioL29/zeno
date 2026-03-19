@@ -32,13 +32,13 @@ pub const InsertPlanKind = enum {
     attach_leaf_value,
     leaf_split,
     prefix_split,
-    add_child,
+    addChild,
     grow_and_add_child,
 };
 
 /// Preallocation requirements for one planned insert.
 ///
-/// This records the exact owned objects that `apply_prepared_insert` expects the
+/// This records the exact owned objects that `applyPreparedInsert` expects the
 /// caller to provide so the live apply path never allocates or duplicates work.
 pub const InsertReservationSpec = struct {
     needs_stored_key: bool = false,
@@ -89,7 +89,7 @@ pub const PreparedInsert = struct {
     new_edge_byte: ?u8 = null,
 };
 
-/// Reserved live objects consumed by `apply_prepared_insert`.
+/// Reserved live objects consumed by `applyPreparedInsert`.
 ///
 /// Ownership: All pointers are caller-owned before apply. Successful apply
 /// transfers any referenced leaf, stored key, promoted node, split node, and
@@ -114,7 +114,7 @@ const ShadowChild = struct {
 /// The shadow tree keeps only structural metadata plus child ordering so the
 /// planner can simulate inserts without mutating or retaining the live node.
 const ShadowInternal = struct {
-    node_type: NodeType,
+    nodeType: NodeType,
     num_children: u16,
     prefix_len: u16,
     prefix: [MAX_PREFIX_LEN]u8,
@@ -128,9 +128,9 @@ const ShadowInternal = struct {
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-fn recommended_shadow_child_capacity(node_type: NodeType, minimum: u16) u16 {
-    return switch (node_type) {
-        .node4, .node16, .node48 => @max(minimum, node.capacity_for(node_type)),
+fn recommendedShadowChildCapacity(nodeType: NodeType, minimum: u16) u16 {
+    return switch (nodeType) {
+        .node4, .node16, .node48 => @max(minimum, node.capacityFor(nodeType)),
         .node256 => minimum,
     };
 }
@@ -160,7 +160,7 @@ pub const ShadowTree = struct {
     ///
     /// Ownership: The returned `ShadowTree` owns the allocated shadow root and
     /// borrows `live_root` for later deferred materialization.
-    pub fn init_from_live(allocator: std.mem.Allocator, live_root: *const Node) !ShadowTree {
+    pub fn initFromLive(allocator: std.mem.Allocator, live_root: *const Node) !ShadowTree {
         const root = try allocator.create(ShadowNode);
         root.* = .{ .live = live_root };
         return .{
@@ -179,7 +179,7 @@ pub const ShadowTree = struct {
     ///
     /// Ownership: The returned `PreparedInsert.path` is owned by the caller
     /// through `scratch_allocator`.
-    pub fn plan_insert(self: *ShadowTree, scratch_allocator: std.mem.Allocator, key: []const u8) !PreparedInsert {
+    pub fn planInsert(self: *ShadowTree, scratch_allocator: std.mem.Allocator, key: []const u8) !PreparedInsert {
         var path_builder = std.ArrayList(InsertPathStep).empty;
         defer path_builder.deinit(scratch_allocator);
 
@@ -201,7 +201,7 @@ pub const ShadowTree = struct {
                         .target_depth = depth,
                     };
                 },
-                .live => |live| switch (node.node_decode(live.*)) {
+                .live => |live| switch (node.nodeDecode(live.*)) {
                     .empty => {
                         current.* = .{ .empty = {} };
                         continue;
@@ -218,18 +218,18 @@ pub const ShadowTree = struct {
                             };
                         }
 
-                        const old_edge_byte, const new_edge_byte, const split_prefix_len, const split_prefix = leaf_split_details(leaf.key, key, depth);
+                        const old_edge_byte, const new_edge_byte, const split_prefix_len, const split_prefix = leafSplitDetails(leaf.key, key, depth);
 
-                        const new_internal = try create_shadow_internal(self.allocator, .node4, split_prefix_len, split_prefix, leaf.key, null, 2);
-                        const old_leaf_node = try create_shadow_leaf(self.allocator, leaf.key);
-                        const new_leaf_node = try create_shadow_leaf(self.allocator, key);
+                        const new_internal = try createShadowInternal(self.allocator, .node4, split_prefix_len, split_prefix, leaf.key, null, 2);
+                        const old_leaf_node = try createShadowLeaf(self.allocator, leaf.key);
+                        const new_leaf_node = try createShadowLeaf(self.allocator, key);
                         if (old_edge_byte) |byte| {
-                            try insert_shadow_child(self.allocator, new_internal, .{ .key_byte = byte, .node = old_leaf_node });
+                            try insertShadowChild(self.allocator, new_internal, .{ .key_byte = byte, .node = old_leaf_node });
                         } else {
                             new_internal.leaf_value_key = leaf.key;
                         }
                         if (new_edge_byte) |byte| {
-                            try insert_shadow_child(self.allocator, new_internal, .{ .key_byte = byte, .node = new_leaf_node });
+                            try insertShadowChild(self.allocator, new_internal, .{ .key_byte = byte, .node = new_leaf_node });
                         } else {
                             new_internal.leaf_value_key = key;
                         }
@@ -253,7 +253,7 @@ pub const ShadowTree = struct {
                         };
                     },
                     .internal => {
-                        _ = try materialize_live_internal(self.allocator, current, live);
+                        _ = try materializeLiveInternal(self.allocator, current, live);
                         continue;
                     },
                 },
@@ -269,18 +269,18 @@ pub const ShadowTree = struct {
                         };
                     }
 
-                    const old_edge_byte, const new_edge_byte, const split_prefix_len, const split_prefix = leaf_split_details(old_key, key, depth);
+                    const old_edge_byte, const new_edge_byte, const split_prefix_len, const split_prefix = leafSplitDetails(old_key, key, depth);
 
-                    const new_internal = try create_shadow_internal(self.allocator, .node4, split_prefix_len, split_prefix, old_key, null, 2);
-                    const old_leaf_node = try create_shadow_leaf(self.allocator, old_key);
-                    const new_leaf_node = try create_shadow_leaf(self.allocator, key);
+                    const new_internal = try createShadowInternal(self.allocator, .node4, split_prefix_len, split_prefix, old_key, null, 2);
+                    const old_leaf_node = try createShadowLeaf(self.allocator, old_key);
+                    const new_leaf_node = try createShadowLeaf(self.allocator, key);
                     if (old_edge_byte) |byte| {
-                        try insert_shadow_child(self.allocator, new_internal, .{ .key_byte = byte, .node = old_leaf_node });
+                        try insertShadowChild(self.allocator, new_internal, .{ .key_byte = byte, .node = old_leaf_node });
                     } else {
                         new_internal.leaf_value_key = old_key;
                     }
                     if (new_edge_byte) |byte| {
-                        try insert_shadow_child(self.allocator, new_internal, .{ .key_byte = byte, .node = new_leaf_node });
+                        try insertShadowChild(self.allocator, new_internal, .{ .key_byte = byte, .node = new_leaf_node });
                     } else {
                         new_internal.leaf_value_key = key;
                     }
@@ -304,39 +304,39 @@ pub const ShadowTree = struct {
                     };
                 },
                 .internal => |shadow| {
-                    const target_node_type = shadow.node_type;
+                    const target_node_type = shadow.nodeType;
                     const target_num_children = shadow.num_children;
                     const target_prefix_len = shadow.prefix_len;
                     const target_prefix = shadow.prefix;
                     const target_exemplar = shadow.exemplar_key;
                     const target_leaf_value_present = shadow.leaf_value_key != null;
-                    const prefix_state = compare_shadow_prefix(shadow, key, depth);
+                    const prefix_state = compareShadowPrefix(shadow, key, depth);
                     if (prefix_state.mismatch_idx < shadow.prefix_len) {
                         const old_exemplar = shadow.exemplar_key;
                         const new_parent_prefix_len: u16 = @intCast(prefix_state.mismatch_idx);
                         var new_parent_prefix = [_]u8{0} ** MAX_PREFIX_LEN;
-                        copy_prefix_bytes(&new_parent_prefix, key, depth, new_parent_prefix_len);
+                        copyPrefixBytes(&new_parent_prefix, key, depth, new_parent_prefix_len);
 
                         const old_edge_byte = old_exemplar[depth + prefix_state.mismatch_idx];
                         const new_edge_byte: ?u8 = if (depth + prefix_state.mismatch_idx < key.len) key[depth + prefix_state.mismatch_idx] else null;
 
                         const rewritten_old_prefix_len: u16 = shadow.prefix_len - @as(u16, @intCast(prefix_state.mismatch_idx + 1));
                         var rewritten_old_prefix = [_]u8{0} ** MAX_PREFIX_LEN;
-                        copy_prefix_bytes(&rewritten_old_prefix, old_exemplar, depth + prefix_state.mismatch_idx + 1, rewritten_old_prefix_len);
+                        copyPrefixBytes(&rewritten_old_prefix, old_exemplar, depth + prefix_state.mismatch_idx + 1, rewritten_old_prefix_len);
 
                         shadow.prefix_len = rewritten_old_prefix_len;
                         shadow.prefix = rewritten_old_prefix;
 
-                        const new_parent = try create_shadow_internal(self.allocator, .node4, new_parent_prefix_len, new_parent_prefix, old_exemplar, null, 2);
+                        const new_parent = try createShadowInternal(self.allocator, .node4, new_parent_prefix_len, new_parent_prefix, old_exemplar, null, 2);
                         const old_node = try self.allocator.create(ShadowNode);
                         old_node.* = .{ .internal = shadow };
                         if (new_edge_byte) |byte| {
-                            const new_leaf = try create_shadow_leaf(self.allocator, key);
-                            try insert_shadow_child(self.allocator, new_parent, .{ .key_byte = old_edge_byte, .node = old_node });
-                            try insert_shadow_child(self.allocator, new_parent, .{ .key_byte = byte, .node = new_leaf });
+                            const new_leaf = try createShadowLeaf(self.allocator, key);
+                            try insertShadowChild(self.allocator, new_parent, .{ .key_byte = old_edge_byte, .node = old_node });
+                            try insertShadowChild(self.allocator, new_parent, .{ .key_byte = byte, .node = new_leaf });
                         } else {
                             new_parent.leaf_value_key = key;
-                            try insert_shadow_child(self.allocator, new_parent, .{ .key_byte = old_edge_byte, .node = old_node });
+                            try insertShadowChild(self.allocator, new_parent, .{ .key_byte = old_edge_byte, .node = old_node });
                         }
                         current.* = .{ .internal = new_parent };
 
@@ -374,7 +374,7 @@ pub const ShadowTree = struct {
                                 .path = try path_builder.toOwnedSlice(scratch_allocator),
                                 .reservation = .{},
                                 .target_depth = depth,
-                                .expected_target_node_type = shadow.node_type,
+                                .expected_target_node_type = shadow.nodeType,
                                 .expected_target_num_children = shadow.num_children,
                                 .expected_target_prefix_len = shadow.prefix_len,
                                 .expected_target_prefix = shadow.prefix,
@@ -394,7 +394,7 @@ pub const ShadowTree = struct {
                                 .needs_leaf = true,
                             },
                             .target_depth = depth,
-                            .expected_target_node_type = shadow.node_type,
+                            .expected_target_node_type = shadow.nodeType,
                             .expected_target_num_children = shadow.num_children,
                             .expected_target_prefix_len = shadow.prefix_len,
                             .expected_target_prefix = shadow.prefix,
@@ -405,7 +405,7 @@ pub const ShadowTree = struct {
 
                     const step = InsertPathStep{
                         .child_byte = key[depth],
-                        .expected_node_type = shadow.node_type,
+                        .expected_node_type = shadow.nodeType,
                         .expected_num_children = shadow.num_children,
                         .expected_prefix_len = shadow.prefix_len,
                         .expected_prefix = shadow.prefix,
@@ -413,20 +413,20 @@ pub const ShadowTree = struct {
                         .expected_leaf_value_present = shadow.leaf_value_key != null,
                     };
 
-                    if (find_shadow_child(shadow, key[depth])) |child| {
+                    if (findShadowChild(shadow, key[depth])) |child| {
                         try path_builder.append(scratch_allocator, step);
                         current = child;
                         depth += 1;
                         continue;
                     }
 
-                    const new_leaf = try create_shadow_leaf(self.allocator, key);
-                    try insert_shadow_child(self.allocator, shadow, .{ .key_byte = key[depth], .node = new_leaf });
-                    if (target_num_children == node.capacity_for(target_node_type)) {
-                        shadow.node_type = node.next_type(target_node_type).?;
+                    const new_leaf = try createShadowLeaf(self.allocator, key);
+                    try insertShadowChild(self.allocator, shadow, .{ .key_byte = key[depth], .node = new_leaf });
+                    if (target_num_children == node.capacityFor(target_node_type)) {
+                        shadow.nodeType = node.nextType(target_node_type).?;
                         try shadow.children.ensureTotalCapacity(
                             self.allocator,
-                            recommended_shadow_child_capacity(shadow.node_type, shadow.num_children),
+                            recommendedShadowChildCapacity(shadow.nodeType, shadow.num_children),
                         );
                         return .{
                             .kind = .grow_and_add_child,
@@ -435,7 +435,7 @@ pub const ShadowTree = struct {
                             .reservation = .{
                                 .needs_stored_key = true,
                                 .needs_leaf = true,
-                                .promoted_node_type = shadow.node_type,
+                                .promoted_node_type = shadow.nodeType,
                             },
                             .target_depth = depth,
                             .expected_target_node_type = target_node_type,
@@ -449,7 +449,7 @@ pub const ShadowTree = struct {
                     }
 
                     return .{
-                        .kind = .add_child,
+                        .kind = .addChild,
                         .key = key,
                         .path = try path_builder.toOwnedSlice(scratch_allocator),
                         .reservation = .{
@@ -479,81 +479,81 @@ pub const ShadowTree = struct {
 ///
 /// Ownership: Transfers the portions of `reserved` referenced by
 /// `prepared.kind` into the live tree on success.
-pub fn apply_prepared_insert(root: *Node, prepared: *const PreparedInsert, reserved: *const ReservedInsert) !void {
-    const target = try navigate_to_target(root, prepared);
+pub fn applyPreparedInsert(root: *Node, prepared: *const PreparedInsert, reserved: *const ReservedInsert) !void {
+    const target = try navigateToTarget(root, prepared);
     switch (prepared.kind) {
         .create_root_leaf => {
-            if (!node.node_is_empty(target.node_ref.*)) return error.BatchPlanInvariantViolation;
-            @atomicStore(usize, target.node_ref, node.node_leaf(reserved.leaf orelse return error.BatchPlanInvariantViolation), .monotonic);
+            if (!node.nodeIsEmpty(target.node_ref.*)) return error.BatchPlanInvariantViolation;
+            @atomicStore(usize, target.node_ref, node.nodeLeaf(reserved.leaf orelse return error.BatchPlanInvariantViolation), .monotonic);
         },
         .overwrite_leaf => {
-            const leaf = switch (node.node_decode(target.node_ref.*)) {
+            const leaf = switch (node.nodeDecode(target.node_ref.*)) {
                 .leaf => |existing| existing,
                 else => return error.BatchPlanInvariantViolation,
             };
             if (!std.mem.eql(u8, leaf.key, prepared.expected_target_leaf_key.?)) return error.BatchPlanInvariantViolation;
-            leaf.store_value(reserved.value);
+            leaf.storeValue(reserved.value);
             leaf.value_owner = reserved.value_owner;
         },
         .overwrite_leaf_value => {
-            const header = try validate_target_internal(target.node_ref, prepared, target.depth);
-            const leaf = header.load_leaf_value() orelse return error.BatchPlanInvariantViolation;
+            const header = try validateTargetInternal(target.node_ref, prepared, target.depth);
+            const leaf = header.loadLeafValue() orelse return error.BatchPlanInvariantViolation;
             if (!std.mem.eql(u8, leaf.key, prepared.expected_target_leaf_key.?)) return error.BatchPlanInvariantViolation;
-            leaf.store_value(reserved.value);
+            leaf.storeValue(reserved.value);
             leaf.value_owner = reserved.value_owner;
         },
         .attach_leaf_value => {
-            const header = try validate_target_internal(target.node_ref, prepared, target.depth);
-            if (header.load_leaf_value() != null) return error.BatchPlanInvariantViolation;
-            header.store_leaf_value(reserved.leaf orelse return error.BatchPlanInvariantViolation);
+            const header = try validateTargetInternal(target.node_ref, prepared, target.depth);
+            if (header.loadLeafValue() != null) return error.BatchPlanInvariantViolation;
+            header.storeLeafValue(reserved.leaf orelse return error.BatchPlanInvariantViolation);
         },
-        .add_child => {
-            _ = try validate_target_internal(target.node_ref, prepared, target.depth);
-            try node.add_child_reserved(
+        .addChild => {
+            _ = try validateTargetInternal(target.node_ref, prepared, target.depth);
+            try node.addChildReserved(
                 target.node_ref,
                 prepared.new_edge_byte.?,
-                node.node_leaf(reserved.leaf orelse return error.BatchPlanInvariantViolation),
+                node.nodeLeaf(reserved.leaf orelse return error.BatchPlanInvariantViolation),
                 null,
             );
         },
         .grow_and_add_child => {
-            _ = try validate_target_internal(target.node_ref, prepared, target.depth);
-            try node.add_child_reserved(
+            _ = try validateTargetInternal(target.node_ref, prepared, target.depth);
+            try node.addChildReserved(
                 target.node_ref,
                 prepared.new_edge_byte.?,
-                node.node_leaf(reserved.leaf orelse return error.BatchPlanInvariantViolation),
+                node.nodeLeaf(reserved.leaf orelse return error.BatchPlanInvariantViolation),
                 reserved.promoted_node,
             );
         },
         .leaf_split => {
-            const old_leaf = switch (node.node_decode(target.node_ref.*)) {
+            const old_leaf = switch (node.nodeDecode(target.node_ref.*)) {
                 .leaf => |existing| existing,
                 else => return error.BatchPlanInvariantViolation,
             };
             if (!std.mem.eql(u8, old_leaf.key, prepared.expected_target_leaf_key.?)) return error.BatchPlanInvariantViolation;
             const split = reserved.split_node orelse return error.BatchPlanInvariantViolation;
-            if (split.node_type() != .node4) return error.BatchPlanInvariantViolation;
+            if (split.nodeType() != .node4) return error.BatchPlanInvariantViolation;
             split.node4.* = Node4.init();
             split.node4.header.prefix_len = prepared.new_prefix_len;
             split.node4.header.prefix = prepared.new_prefix;
 
-            var new_node = split.as_node();
+            var new_node = split.asNode();
             if (prepared.old_edge_byte) |byte| {
-                try node.add_child_reserved(&new_node, byte, target.node_ref.*, null);
+                try node.addChildReserved(&new_node, byte, target.node_ref.*, null);
             } else {
-                split.node4.header.store_leaf_value(old_leaf);
+                split.node4.header.storeLeafValue(old_leaf);
             }
             if (prepared.new_edge_byte) |byte| {
-                try node.add_child_reserved(&new_node, byte, node.node_leaf(reserved.leaf.?), null);
+                try node.addChildReserved(&new_node, byte, node.nodeLeaf(reserved.leaf.?), null);
             } else {
-                split.node4.header.store_leaf_value(reserved.leaf.?);
+                split.node4.header.storeLeafValue(reserved.leaf.?);
             }
             @atomicStore(usize, target.node_ref, new_node, .monotonic);
         },
         .prefix_split => {
-            const header = try validate_target_internal(target.node_ref, prepared, target.depth);
+            const header = try validateTargetInternal(target.node_ref, prepared, target.depth);
             const split = reserved.split_node orelse return error.BatchPlanInvariantViolation;
-            if (split.node_type() != .node4) return error.BatchPlanInvariantViolation;
+            if (split.nodeType() != .node4) return error.BatchPlanInvariantViolation;
 
             header.prefix_len = prepared.rewritten_old_prefix_len;
             header.prefix = prepared.rewritten_old_prefix;
@@ -562,12 +562,12 @@ pub fn apply_prepared_insert(root: *Node, prepared: *const PreparedInsert, reser
             split.node4.header.prefix_len = prepared.new_prefix_len;
             split.node4.header.prefix = prepared.new_prefix;
 
-            var new_node = split.as_node();
-            try node.add_child_reserved(&new_node, prepared.old_edge_byte.?, target.node_ref.*, null);
+            var new_node = split.asNode();
+            try node.addChildReserved(&new_node, prepared.old_edge_byte.?, target.node_ref.*, null);
             if (prepared.new_edge_byte) |byte| {
-                try node.add_child_reserved(&new_node, byte, node.node_leaf(reserved.leaf.?), null);
+                try node.addChildReserved(&new_node, byte, node.nodeLeaf(reserved.leaf.?), null);
             } else {
-                split.node4.header.store_leaf_value(reserved.leaf.?);
+                split.node4.header.storeLeafValue(reserved.leaf.?);
             }
             @atomicStore(usize, target.node_ref, new_node, .monotonic);
         },
@@ -579,7 +579,7 @@ pub fn apply_prepared_insert(root: *Node, prepared: *const PreparedInsert, reser
 /// Time Complexity: O(p), where `p` is the stored prefix length bounded by `MAX_PREFIX_LEN`.
 ///
 /// Allocator: Does not allocate.
-fn shadow_prefix_before_rewrite(
+fn shadowPrefixBeforeRewrite(
     exemplar_key: []const u8,
     stored_prefix: [MAX_PREFIX_LEN]u8,
     rewritten_prefix_len: u16,
@@ -593,7 +593,7 @@ fn shadow_prefix_before_rewrite(
     const stored_len = @min(original_prefix_len, MAX_PREFIX_LEN);
     if (stored_len > 0) {
         if (original_prefix_len <= MAX_PREFIX_LEN) {
-            copy_prefix_bytes(&prefix, exemplar_key, depth, original_prefix_len);
+            copyPrefixBytes(&prefix, exemplar_key, depth, original_prefix_len);
         } else {
             @memcpy(prefix[0..MAX_PREFIX_LEN], stored_prefix[0..MAX_PREFIX_LEN]);
         }
@@ -611,7 +611,7 @@ const PrefixCompare = struct {
 /// Time Complexity: O(p), where `p` is `shadow.prefix_len`.
 ///
 /// Allocator: Does not allocate.
-fn compare_shadow_prefix(shadow: *const ShadowInternal, key: []const u8, depth_in: usize) PrefixCompare {
+fn compareShadowPrefix(shadow: *const ShadowInternal, key: []const u8, depth_in: usize) PrefixCompare {
     var depth = depth_in;
     var mismatch_idx: usize = 0;
     const stored_len = @min(shadow.prefix_len, MAX_PREFIX_LEN);
@@ -635,7 +635,7 @@ fn compare_shadow_prefix(shadow: *const ShadowInternal, key: []const u8, depth_i
 /// Allocator: Allocates one `ShadowNode` from `allocator`.
 ///
 /// Ownership: The returned wrapper is owned by the caller; `key` is borrowed.
-fn create_shadow_leaf(allocator: std.mem.Allocator, key: []const u8) !*ShadowNode {
+fn createShadowLeaf(allocator: std.mem.Allocator, key: []const u8) !*ShadowNode {
     const shadow = try allocator.create(ShadowNode);
     shadow.* = .{ .leaf = key };
     return shadow;
@@ -648,7 +648,7 @@ fn create_shadow_leaf(allocator: std.mem.Allocator, key: []const u8) !*ShadowNod
 /// Allocator: Allocates one `ShadowNode` from `allocator`.
 ///
 /// Ownership: The returned wrapper is owned by the caller and borrows `live`.
-fn create_live_shadow_node(allocator: std.mem.Allocator, live: *const Node) !*ShadowNode {
+fn createLiveShadowNode(allocator: std.mem.Allocator, live: *const Node) !*ShadowNode {
     const shadow = try allocator.create(ShadowNode);
     shadow.* = .{ .live = live };
     return shadow;
@@ -663,33 +663,33 @@ fn create_live_shadow_node(allocator: std.mem.Allocator, live: *const Node) !*Sh
 ///
 /// Ownership: The returned `ShadowInternal` is owned by the shadow tree, while
 /// embedded exemplar keys and live child pointers remain borrowed from the live ART.
-fn materialize_live_internal(allocator: std.mem.Allocator, current: *ShadowNode, live: *const Node) !*ShadowInternal {
-    const header = switch (node.node_decode(live.*)) {
+fn materializeLiveInternal(allocator: std.mem.Allocator, current: *ShadowNode, live: *const Node) !*ShadowInternal {
+    const header = switch (node.nodeDecode(live.*)) {
         .internal => |internal| internal,
         else => unreachable,
     };
-    const internal = try create_shadow_internal(
+    const internal = try createShadowInternal(
         allocator,
-        header.node_type,
+        header.nodeType,
         header.prefix_len,
         header.prefix,
-        Tree.find_any_leaf(live).key,
-        if (header.load_leaf_value()) |leaf_value| leaf_value.key else null,
-        recommended_shadow_child_capacity(header.node_type, header.num_children),
+        Tree.findAnyLeaf(live).key,
+        if (header.loadLeafValue()) |leaf_value| leaf_value.key else null,
+        recommendedShadowChildCapacity(header.nodeType, header.num_children),
     );
     const ChildCopyCtx = struct {
         allocator: std.mem.Allocator,
         internal: *ShadowInternal,
 
         fn visit(ctx: @This(), key_byte: u8, child: *const Node) anyerror!bool {
-            try insert_shadow_child(ctx.allocator, ctx.internal, .{
+            try insertShadowChild(ctx.allocator, ctx.internal, .{
                 .key_byte = key_byte,
-                .node = try create_live_shadow_node(ctx.allocator, child),
+                .node = try createLiveShadowNode(ctx.allocator, child),
             });
             return true;
         }
     };
-    header.for_each_child(ChildCopyCtx, .{
+    header.forEachChild(ChildCopyCtx, .{
         .allocator = allocator,
         .internal = internal,
     }, ChildCopyCtx.visit) catch |err| switch (err) {
@@ -709,9 +709,9 @@ fn materialize_live_internal(allocator: std.mem.Allocator, current: *ShadowNode,
 ///
 /// Ownership: The returned shadow node is owned by the caller and borrows
 /// `exemplar_key` and `leaf_value_key`.
-fn create_shadow_internal(
+fn createShadowInternal(
     allocator: std.mem.Allocator,
-    node_type: NodeType,
+    nodeType: NodeType,
     prefix_len: u16,
     prefix: [MAX_PREFIX_LEN]u8,
     exemplar_key: []const u8,
@@ -720,7 +720,7 @@ fn create_shadow_internal(
 ) !*ShadowInternal {
     const internal = try allocator.create(ShadowInternal);
     internal.* = .{
-        .node_type = node_type,
+        .nodeType = nodeType,
         .num_children = 0,
         .prefix_len = prefix_len,
         .prefix = prefix,
@@ -730,7 +730,7 @@ fn create_shadow_internal(
     };
     try internal.children.ensureTotalCapacity(
         allocator,
-        recommended_shadow_child_capacity(node_type, child_capacity),
+        recommendedShadowChildCapacity(nodeType, child_capacity),
     );
     return internal;
 }
@@ -740,7 +740,7 @@ fn create_shadow_internal(
 /// Time Complexity: O(c), where `c` is `internal.children.items.len`.
 ///
 /// Allocator: May grow the child list through `allocator`.
-fn insert_shadow_child(allocator: std.mem.Allocator, internal: *ShadowInternal, child: ShadowChild) !void {
+fn insertShadowChild(allocator: std.mem.Allocator, internal: *ShadowInternal, child: ShadowChild) !void {
     try internal.children.ensureUnusedCapacity(allocator, 1);
     var index: usize = 0;
     while (index < internal.children.items.len and internal.children.items[index].key_byte < child.key_byte) : (index += 1) {}
@@ -753,7 +753,7 @@ fn insert_shadow_child(allocator: std.mem.Allocator, internal: *ShadowInternal, 
 /// Time Complexity: O(c), where `c` is `internal.children.items.len`.
 ///
 /// Allocator: Does not allocate.
-fn find_shadow_child(internal: *ShadowInternal, key_byte: u8) ?*ShadowNode {
+fn findShadowChild(internal: *ShadowInternal, key_byte: u8) ?*ShadowNode {
     for (internal.children.items) |child| {
         if (child.key_byte == key_byte) return child.node;
     }
@@ -765,14 +765,14 @@ fn find_shadow_child(internal: *ShadowInternal, key_byte: u8) ?*ShadowNode {
 /// Time Complexity: O(k), where `k` is the common-prefix length from `depth`.
 ///
 /// Allocator: Does not allocate.
-fn leaf_split_details(old_key: []const u8, new_key: []const u8, depth: usize) struct { ?u8, ?u8, u16, [MAX_PREFIX_LEN]u8 } {
+fn leafSplitDetails(old_key: []const u8, new_key: []const u8, depth: usize) struct { ?u8, ?u8, u16, [MAX_PREFIX_LEN]u8 } {
     var i: usize = depth;
     const min_len = @min(old_key.len, new_key.len);
     while (i < min_len and old_key[i] == new_key[i]) : (i += 1) {}
 
     const prefix_len: u16 = @intCast(i - depth);
     var prefix = [_]u8{0} ** MAX_PREFIX_LEN;
-    copy_prefix_bytes(&prefix, new_key, depth, prefix_len);
+    copyPrefixBytes(&prefix, new_key, depth, prefix_len);
     const old_edge: ?u8 = if (i < old_key.len) old_key[i] else null;
     const new_edge: ?u8 = if (i < new_key.len) new_key[i] else null;
     return .{ old_edge, new_edge, prefix_len, prefix };
@@ -783,7 +783,7 @@ fn leaf_split_details(old_key: []const u8, new_key: []const u8, depth: usize) st
 /// Time Complexity: O(p), where `p` is `min(prefix_len, MAX_PREFIX_LEN)`.
 ///
 /// Allocator: Does not allocate.
-fn copy_prefix_bytes(prefix: *[MAX_PREFIX_LEN]u8, key: []const u8, depth: usize, prefix_len: u16) void {
+fn copyPrefixBytes(prefix: *[MAX_PREFIX_LEN]u8, key: []const u8, depth: usize, prefix_len: u16) void {
     const stored_len = @min(prefix_len, MAX_PREFIX_LEN);
     if (stored_len == 0) return;
     @memcpy(prefix[0..stored_len], key[depth .. depth + stored_len]);
@@ -794,17 +794,17 @@ fn copy_prefix_bytes(prefix: *[MAX_PREFIX_LEN]u8, key: []const u8, depth: usize,
 /// Time Complexity: O(k), where `k` is the combined prefix and edge length in `prepared.path`.
 ///
 /// Allocator: Does not allocate.
-fn navigate_to_target(root: *Node, prepared: *const PreparedInsert) !struct { node_ref: *Node, depth: usize } {
+fn navigateToTarget(root: *Node, prepared: *const PreparedInsert) !struct { node_ref: *Node, depth: usize } {
     var current = root;
     var depth: usize = 0;
     for (prepared.path) |step| {
-        const header = switch (node.node_decode(current.*)) {
+        const header = switch (node.nodeDecode(current.*)) {
             .internal => |internal| internal,
             else => return error.BatchPlanInvariantViolation,
         };
-        try validate_internal_preconditions(current, header, step.expected_node_type, step.expected_num_children, step.expected_prefix_len, step.expected_prefix, step.expected_exemplar_key, step.expected_leaf_value_present, depth);
+        try validateInternalPreconditions(current, header, step.expected_node_type, step.expected_num_children, step.expected_prefix_len, step.expected_prefix, step.expected_exemplar_key, step.expected_leaf_value_present, depth);
         if (depth + step.expected_prefix_len >= prepared.key.len) return error.BatchPlanInvariantViolation;
-        const child = header.find_child(step.child_byte) orelse return error.BatchPlanInvariantViolation;
+        const child = header.findChild(step.child_byte) orelse return error.BatchPlanInvariantViolation;
         depth += step.expected_prefix_len + 1;
         current = child;
     }
@@ -816,12 +816,12 @@ fn navigate_to_target(root: *Node, prepared: *const PreparedInsert) !struct { no
 /// Time Complexity: O(p), where `p` is the hidden-prefix validation work when the target prefix exceeds `MAX_PREFIX_LEN`.
 ///
 /// Allocator: Does not allocate.
-fn validate_target_internal(node_ref: *Node, prepared: *const PreparedInsert, depth: usize) !*NodeHeader {
-    const header = switch (node.node_decode(node_ref.*)) {
+fn validateTargetInternal(node_ref: *Node, prepared: *const PreparedInsert, depth: usize) !*NodeHeader {
+    const header = switch (node.nodeDecode(node_ref.*)) {
         .internal => |internal| internal,
         else => return error.BatchPlanInvariantViolation,
     };
-    try validate_internal_preconditions(
+    try validateInternalPreconditions(
         node_ref,
         header,
         prepared.expected_target_node_type.?,
@@ -840,7 +840,7 @@ fn validate_target_internal(node_ref: *Node, prepared: *const PreparedInsert, de
 /// Time Complexity: O(p), where `p` is the checked prefix length plus any hidden exemplar comparison.
 ///
 /// Allocator: Does not allocate.
-fn validate_internal_preconditions(
+fn validateInternalPreconditions(
     node_ref: *const Node,
     header: *const NodeHeader,
     expected_node_type: NodeType,
@@ -851,17 +851,17 @@ fn validate_internal_preconditions(
     expected_leaf_value_present: bool,
     depth: usize,
 ) !void {
-    if (header.node_type != expected_node_type) return error.BatchPlanInvariantViolation;
+    if (header.nodeType != expected_node_type) return error.BatchPlanInvariantViolation;
     if (header.num_children != expected_num_children) return error.BatchPlanInvariantViolation;
     if (header.prefix_len != expected_prefix_len) return error.BatchPlanInvariantViolation;
-    if ((header.load_leaf_value() != null) != expected_leaf_value_present) return error.BatchPlanInvariantViolation;
+    if ((header.loadLeafValue() != null) != expected_leaf_value_present) return error.BatchPlanInvariantViolation;
 
     const stored_len = @min(expected_prefix_len, MAX_PREFIX_LEN);
     if (stored_len > 0 and !std.mem.eql(u8, header.prefix[0..stored_len], expected_prefix[0..stored_len])) {
         return error.BatchPlanInvariantViolation;
     }
     if (expected_prefix_len > MAX_PREFIX_LEN) {
-        const exemplar = Tree.find_any_leaf(node_ref).key;
+        const exemplar = Tree.findAnyLeaf(node_ref).key;
         const hidden_start = depth + MAX_PREFIX_LEN;
         const hidden_end = depth + expected_prefix_len;
         if (!std.mem.eql(u8, exemplar[hidden_start..hidden_end], expected_exemplar_key[hidden_start..hidden_end])) {
@@ -870,15 +870,15 @@ fn validate_internal_preconditions(
     }
 }
 
-/// Allocates one reserved internal node matching `node_type`.
+/// Allocates one reserved internal node matching `nodeType`.
 ///
 /// Time Complexity: O(1).
 ///
 /// Allocator: Allocates one reserved ART node from `allocator`.
 ///
 /// Ownership: The returned reservation is owned by the caller.
-fn reserve_internal_node(allocator: std.mem.Allocator, node_type: NodeType) !ReservedInternalNode {
-    return switch (node_type) {
+fn reserveInternalNode(allocator: std.mem.Allocator, nodeType: NodeType) !ReservedInternalNode {
+    return switch (nodeType) {
         .node4 => .{ .node4 = try allocator.create(Node4) },
         .node16 => .{ .node16 = try allocator.create(Node16) },
         .node48 => .{ .node48 = try allocator.create(Node48) },
@@ -894,7 +894,7 @@ fn reserve_internal_node(allocator: std.mem.Allocator, node_type: NodeType) !Res
 /// and optional reserved internal nodes from `allocator`.
 ///
 /// Ownership: The returned reservation is owned by the caller until one test applies it.
-fn reserve_insert_for_test(
+fn reserveInsertForTest(
     allocator: std.mem.Allocator,
     key: []const u8,
     value: Value,
@@ -920,11 +920,11 @@ fn reserve_insert_for_test(
         };
         reserved.leaf = leaf;
     }
-    if (prepared.reservation.split_node_type) |node_type| {
-        reserved.split_node = try reserve_internal_node(allocator, node_type);
+    if (prepared.reservation.split_node_type) |nodeType| {
+        reserved.split_node = try reserveInternalNode(allocator, nodeType);
     }
-    if (prepared.reservation.promoted_node_type) |node_type| {
-        reserved.promoted_node = try reserve_internal_node(allocator, node_type);
+    if (prepared.reservation.promoted_node_type) |nodeType| {
+        reserved.promoted_node = try reserveInternalNode(allocator, nodeType);
     }
 
     return reserved;
@@ -937,7 +937,7 @@ fn reserve_insert_for_test(
 /// Allocator: Allocates owned key bytes, one `Value`, and one `Leaf` from `allocator`.
 ///
 /// Ownership: The returned leaf and its owned key/value storage are owned by the caller.
-fn create_leaf_for_test(allocator: std.mem.Allocator, key: []const u8, value: Value) !*Leaf {
+fn createLeafForTest(allocator: std.mem.Allocator, key: []const u8, value: Value) !*Leaf {
     const stored_key = try allocator.dupe(u8, key);
     const stored_value = try allocator.create(Value);
     stored_value.* = try value.clone(allocator);
@@ -958,15 +958,15 @@ fn create_leaf_for_test(allocator: std.mem.Allocator, key: []const u8, value: Va
 /// Allocator: Does not allocate.
 ///
 /// Ownership: Returns a borrowed pointer into the live tree when present.
-fn lookup_value_for_test(root: *const Node, key: []const u8) ?*Value {
+fn lookupValueForTest(root: *const Node, key: []const u8) ?*Value {
     var current_node_ptr: *const Node = root;
     var depth: usize = 0;
 
-    while (!node.node_is_empty(current_node_ptr.*)) {
-        switch (node.node_decode(current_node_ptr.*)) {
+    while (!node.nodeIsEmpty(current_node_ptr.*)) {
+        switch (node.nodeDecode(current_node_ptr.*)) {
             .empty => unreachable,
             .leaf => |leaf| {
-                if (std.mem.eql(u8, leaf.key, key)) return leaf.load_value();
+                if (std.mem.eql(u8, leaf.key, key)) return leaf.loadValue();
                 return null;
             },
             .internal => |header| {
@@ -977,7 +977,7 @@ fn lookup_value_for_test(root: *const Node, key: []const u8) ?*Value {
                         depth += 1;
                     }
                     if (header.prefix_len > MAX_PREFIX_LEN) {
-                        const exemplar = Tree.find_any_leaf(current_node_ptr).key;
+                        const exemplar = Tree.findAnyLeaf(current_node_ptr).key;
                         const limit = @min(exemplar.len, key.len);
                         for (MAX_PREFIX_LEN..header.prefix_len) |_| {
                             if (depth >= limit or exemplar[depth] != key[depth]) return null;
@@ -987,10 +987,10 @@ fn lookup_value_for_test(root: *const Node, key: []const u8) ?*Value {
                 }
 
                 if (depth == key.len) {
-                    return if (header.load_leaf_value()) |leaf| leaf.load_value() else null;
+                    return if (header.loadLeafValue()) |leaf| leaf.loadValue() else null;
                 }
 
-                const child = header.find_child(key[depth]) orelse return null;
+                const child = header.findChild(key[depth]) orelse return null;
                 current_node_ptr = child;
                 depth += 1;
             },
@@ -1006,15 +1006,15 @@ test "plan_insert and apply_prepared_insert create one root leaf" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var root = node.node_empty();
-    var shadow = try ShadowTree.init_from_live(allocator, &root);
-    const prepared = try shadow.plan_insert(allocator, "alpha");
-    const reserved = try reserve_insert_for_test(allocator, "alpha", .{ .integer = 7 }, prepared);
+    var root = node.nodeEmpty();
+    var shadow = try ShadowTree.initFromLive(allocator, &root);
+    const prepared = try shadow.planInsert(allocator, "alpha");
+    const reserved = try reserveInsertForTest(allocator, "alpha", .{ .integer = 7 }, prepared);
 
     try testing.expectEqual(InsertPlanKind.create_root_leaf, prepared.kind);
-    try apply_prepared_insert(&root, &prepared, &reserved);
+    try applyPreparedInsert(&root, &prepared, &reserved);
 
-    const stored = lookup_value_for_test(&root, "alpha") orelse return error.TestUnexpectedResult;
+    const stored = lookupValueForTest(&root, "alpha") orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(i64, 7), stored.integer);
 }
 
@@ -1025,16 +1025,16 @@ test "plan_insert and apply_prepared_insert overwrite an exact existing leaf" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const existing = try create_leaf_for_test(allocator, "alpha", .{ .integer = 1 });
-    var root = node.node_leaf(existing);
-    var shadow = try ShadowTree.init_from_live(allocator, &root);
-    const prepared = try shadow.plan_insert(allocator, "alpha");
-    const reserved = try reserve_insert_for_test(allocator, "alpha", .{ .integer = 9 }, prepared);
+    const existing = try createLeafForTest(allocator, "alpha", .{ .integer = 1 });
+    var root = node.nodeLeaf(existing);
+    var shadow = try ShadowTree.initFromLive(allocator, &root);
+    const prepared = try shadow.planInsert(allocator, "alpha");
+    const reserved = try reserveInsertForTest(allocator, "alpha", .{ .integer = 9 }, prepared);
 
     try testing.expectEqual(InsertPlanKind.overwrite_leaf, prepared.kind);
-    try apply_prepared_insert(&root, &prepared, &reserved);
+    try applyPreparedInsert(&root, &prepared, &reserved);
 
-    const stored = lookup_value_for_test(&root, "alpha") orelse return error.TestUnexpectedResult;
+    const stored = lookupValueForTest(&root, "alpha") orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(i64, 9), stored.integer);
 }
 
@@ -1045,17 +1045,17 @@ test "plan_insert and apply_prepared_insert split one leaf for diverging keys" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const existing = try create_leaf_for_test(allocator, "alpha", .{ .integer = 1 });
-    var root = node.node_leaf(existing);
-    var shadow = try ShadowTree.init_from_live(allocator, &root);
-    const prepared = try shadow.plan_insert(allocator, "beta");
-    const reserved = try reserve_insert_for_test(allocator, "beta", .{ .integer = 2 }, prepared);
+    const existing = try createLeafForTest(allocator, "alpha", .{ .integer = 1 });
+    var root = node.nodeLeaf(existing);
+    var shadow = try ShadowTree.initFromLive(allocator, &root);
+    const prepared = try shadow.planInsert(allocator, "beta");
+    const reserved = try reserveInsertForTest(allocator, "beta", .{ .integer = 2 }, prepared);
 
     try testing.expectEqual(InsertPlanKind.leaf_split, prepared.kind);
-    try apply_prepared_insert(&root, &prepared, &reserved);
+    try applyPreparedInsert(&root, &prepared, &reserved);
 
-    const alpha = lookup_value_for_test(&root, "alpha") orelse return error.TestUnexpectedResult;
-    const beta = lookup_value_for_test(&root, "beta") orelse return error.TestUnexpectedResult;
+    const alpha = lookupValueForTest(&root, "alpha") orelse return error.TestUnexpectedResult;
+    const beta = lookupValueForTest(&root, "beta") orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(i64, 1), alpha.integer);
     try testing.expectEqual(@as(i64, 2), beta.integer);
 }
@@ -1067,25 +1067,25 @@ test "plan_insert and apply_prepared_insert prefix split a compressed path" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const existing = try create_leaf_for_test(allocator, "abcx", .{ .integer = 1 });
+    const existing = try createLeafForTest(allocator, "abcx", .{ .integer = 1 });
     const root_internal = try allocator.create(Node4);
     root_internal.* = Node4.init();
     root_internal.header.prefix_len = 2;
     root_internal.header.prefix[0] = 'a';
     root_internal.header.prefix[1] = 'b';
 
-    var root = node.node_internal(&root_internal.header);
-    try node.add_child_reserved(&root, 'c', node.node_leaf(existing), null);
+    var root = node.nodeInternal(&root_internal.header);
+    try node.addChildReserved(&root, 'c', node.nodeLeaf(existing), null);
 
-    var shadow = try ShadowTree.init_from_live(allocator, &root);
-    const prepared = try shadow.plan_insert(allocator, "adz");
-    const reserved = try reserve_insert_for_test(allocator, "adz", .{ .integer = 2 }, prepared);
+    var shadow = try ShadowTree.initFromLive(allocator, &root);
+    const prepared = try shadow.planInsert(allocator, "adz");
+    const reserved = try reserveInsertForTest(allocator, "adz", .{ .integer = 2 }, prepared);
 
     try testing.expectEqual(InsertPlanKind.prefix_split, prepared.kind);
-    try apply_prepared_insert(&root, &prepared, &reserved);
+    try applyPreparedInsert(&root, &prepared, &reserved);
 
-    const old_value = lookup_value_for_test(&root, "abcx") orelse return error.TestUnexpectedResult;
-    const new_value = lookup_value_for_test(&root, "adz") orelse return error.TestUnexpectedResult;
+    const old_value = lookupValueForTest(&root, "abcx") orelse return error.TestUnexpectedResult;
+    const new_value = lookupValueForTest(&root, "adz") orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(i64, 1), old_value.integer);
     try testing.expectEqual(@as(i64, 2), new_value.integer);
 }
@@ -1099,23 +1099,23 @@ test "plan_insert and apply_prepared_insert grow and add one child when the node
 
     const root_internal = try allocator.create(Node4);
     root_internal.* = Node4.init();
-    var root = node.node_internal(&root_internal.header);
+    var root = node.nodeInternal(&root_internal.header);
 
     const keys = [_][]const u8{ "a", "b", "c", "d" };
     for (keys, 0..) |key, index| {
-        const leaf = try create_leaf_for_test(allocator, key, .{ .integer = @intCast(index + 1) });
-        try node.add_child_reserved(&root, key[0], node.node_leaf(leaf), null);
+        const leaf = try createLeafForTest(allocator, key, .{ .integer = @intCast(index + 1) });
+        try node.addChildReserved(&root, key[0], node.nodeLeaf(leaf), null);
     }
 
-    var shadow = try ShadowTree.init_from_live(allocator, &root);
-    const prepared = try shadow.plan_insert(allocator, "e");
-    const reserved = try reserve_insert_for_test(allocator, "e", .{ .integer = 5 }, prepared);
+    var shadow = try ShadowTree.initFromLive(allocator, &root);
+    const prepared = try shadow.planInsert(allocator, "e");
+    const reserved = try reserveInsertForTest(allocator, "e", .{ .integer = 5 }, prepared);
 
     try testing.expectEqual(InsertPlanKind.grow_and_add_child, prepared.kind);
-    try apply_prepared_insert(&root, &prepared, &reserved);
+    try applyPreparedInsert(&root, &prepared, &reserved);
 
-    try testing.expectEqual(NodeType.node16, node.node_to_internal(root).node_type);
-    const stored = lookup_value_for_test(&root, "e") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(NodeType.node16, node.nodeToInternal(root).nodeType);
+    const stored = lookupValueForTest(&root, "e") orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(i64, 5), stored.integer);
 }
 
@@ -1137,17 +1137,17 @@ test "shadow planning preserves hidden-prefix sequential inserts across repeated
 
     var shadow_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer shadow_arena.deinit();
-    var shadow = try tree.build_shadow_tree(shadow_arena.allocator());
-    const prepared_two = try tree.plan_prepared_insert(&shadow, shadow_arena.allocator(), "abcdefghijklmnop:2");
-    const prepared_three = try tree.plan_prepared_insert(&shadow, shadow_arena.allocator(), "abcdefghijklmnop:3");
+    var shadow = try tree.buildShadowTree(shadow_arena.allocator());
+    const prepared_two = try tree.planPreparedInsert(&shadow, shadow_arena.allocator(), "abcdefghijklmnop:2");
+    const prepared_three = try tree.planPreparedInsert(&shadow, shadow_arena.allocator(), "abcdefghijklmnop:3");
 
     var reserved_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer reserved_arena.deinit();
-    const reserved_two = try reserve_insert_for_test(reserved_arena.allocator(), "abcdefghijklmnop:2", .{ .integer = 20 }, prepared_two);
-    const reserved_three = try reserve_insert_for_test(reserved_arena.allocator(), "abcdefghijklmnop:3", .{ .integer = 30 }, prepared_three);
+    const reserved_two = try reserveInsertForTest(reserved_arena.allocator(), "abcdefghijklmnop:2", .{ .integer = 20 }, prepared_two);
+    const reserved_three = try reserveInsertForTest(reserved_arena.allocator(), "abcdefghijklmnop:3", .{ .integer = 30 }, prepared_three);
 
-    try tree.apply_prepared_insert(&prepared_two, &reserved_two);
-    try tree.apply_prepared_insert(&prepared_three, &reserved_three);
+    try tree.applyPreparedInsert(&prepared_two, &reserved_two);
+    try tree.applyPreparedInsert(&prepared_three, &reserved_three);
 
     try testing.expectEqual(@as(i64, 10), tree.lookup("abcdefghijklmnop:1").?.integer);
     try testing.expectEqual(@as(i64, 20), tree.lookup("abcdefghijklmnop:2").?.integer);
@@ -1161,13 +1161,13 @@ test "apply_prepared_insert detects invariant drift between planning and apply" 
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const existing = try create_leaf_for_test(allocator, "alpha", .{ .integer = 1 });
-    var root = node.node_leaf(existing);
-    var shadow = try ShadowTree.init_from_live(allocator, &root);
-    const prepared = try shadow.plan_insert(allocator, "alpha");
-    const reserved = try reserve_insert_for_test(allocator, "alpha", .{ .integer = 2 }, prepared);
+    const existing = try createLeafForTest(allocator, "alpha", .{ .integer = 1 });
+    var root = node.nodeLeaf(existing);
+    var shadow = try ShadowTree.initFromLive(allocator, &root);
+    const prepared = try shadow.planInsert(allocator, "alpha");
+    const reserved = try reserveInsertForTest(allocator, "alpha", .{ .integer = 2 }, prepared);
 
     existing.key = "beta";
 
-    try testing.expectError(error.BatchPlanInvariantViolation, apply_prepared_insert(&root, &prepared, &reserved));
+    try testing.expectError(error.BatchPlanInvariantViolation, applyPreparedInsert(&root, &prepared, &reserved));
 }

@@ -20,7 +20,7 @@ pub const MAX_PREFIX_LEN = 11;
 pub const NodeHeader = extern struct {
     num_children: u16 = 0,
     prefix_len: u16 = 0,
-    node_type: NodeType,
+    nodeType: NodeType,
     prefix: [MAX_PREFIX_LEN]u8 = undefined,
     leaf_value: ?*Leaf = null,
 
@@ -31,7 +31,7 @@ pub const NodeHeader = extern struct {
     /// Allocator: Does not allocate.
     pub fn init(n_type: NodeType) NodeHeader {
         return .{
-            .node_type = n_type,
+            .nodeType = n_type,
             .leaf_value = null,
         };
     }
@@ -41,20 +41,20 @@ pub const NodeHeader = extern struct {
     /// Time Complexity: O(1).
     ///
     /// Allocator: Does not allocate.
-    pub fn copy_meta_from(self: *NodeHeader, src: *const NodeHeader) void {
+    pub fn copyMetaFrom(self: *NodeHeader, src: *const NodeHeader) void {
         self.num_children = src.num_children;
         self.prefix_len = src.prefix_len;
         self.prefix = src.prefix;
-        self.store_leaf_value(src.load_leaf_value());
+        self.storeLeafValue(src.loadLeafValue());
     }
 
-    pub inline fn load_leaf_value(self: *const NodeHeader) ?*Leaf {
+    pub inline fn loadLeafValue(self: *const NodeHeader) ?*Leaf {
         const raw = @atomicLoad(usize, @as(*const usize, @ptrCast(&self.leaf_value)), .acquire);
         if (raw == 0) return null;
         return @ptrFromInt(raw);
     }
 
-    pub inline fn store_leaf_value(self: *NodeHeader, leaf: ?*Leaf) void {
+    pub inline fn storeLeafValue(self: *NodeHeader, leaf: ?*Leaf) void {
         const raw: usize = if (leaf) |l| @intFromPtr(l) else 0;
         @atomicStore(usize, @as(*usize, @ptrCast(&self.leaf_value)), raw, .monotonic);
     }
@@ -64,12 +64,12 @@ pub const NodeHeader = extern struct {
     /// Time Complexity: O(1) bounded by node class implementation.
     ///
     /// Allocator: Does not allocate.
-    pub fn find_child(self: *const NodeHeader, key_byte: u8) ?*Node {
-        return switch (self.node_type) {
-            .node4 => @as(*const Node4, @alignCast(@fieldParentPtr("header", self))).find_child(key_byte),
-            .node16 => @as(*const Node16, @alignCast(@fieldParentPtr("header", self))).find_child(key_byte),
-            .node48 => @as(*const Node48, @alignCast(@fieldParentPtr("header", self))).find_child(key_byte),
-            .node256 => @as(*const Node256, @alignCast(@fieldParentPtr("header", self))).find_child(key_byte),
+    pub fn findChild(self: *const NodeHeader, key_byte: u8) ?*Node {
+        return switch (self.nodeType) {
+            .node4 => @as(*const Node4, @alignCast(@fieldParentPtr("header", self))).findChild(key_byte),
+            .node16 => @as(*const Node16, @alignCast(@fieldParentPtr("header", self))).findChild(key_byte),
+            .node48 => @as(*const Node48, @alignCast(@fieldParentPtr("header", self))).findChild(key_byte),
+            .node256 => @as(*const Node256, @alignCast(@fieldParentPtr("header", self))).findChild(key_byte),
         };
     }
 
@@ -78,8 +78,8 @@ pub const NodeHeader = extern struct {
     /// Time Complexity: O(1) for Node4/Node16 and bounded O(256) for Node48/Node256.
     ///
     /// Allocator: Does not allocate.
-    pub fn first_child(self: *const NodeHeader) *const Node {
-        switch (self.node_type) {
+    pub fn firstChild(self: *const NodeHeader) *const Node {
+        switch (self.nodeType) {
             .node4 => {
                 const n4 = @as(*const Node4, @alignCast(@fieldParentPtr("header", self)));
                 std.debug.assert(n4.header.num_children > 0);
@@ -102,7 +102,7 @@ pub const NodeHeader = extern struct {
             .node256 => {
                 const n256 = @as(*const Node256, @alignCast(@fieldParentPtr("header", self)));
                 for (0..256) |i| {
-                    if (!node_is_empty(n256.children[i])) {
+                    if (!nodeIsEmpty(n256.children[i])) {
                         return &n256.children[i];
                     }
                 }
@@ -118,13 +118,13 @@ pub const NodeHeader = extern struct {
     /// Time Complexity: O(children) for Node4/Node16 and bounded O(256) for Node48/Node256.
     ///
     /// Allocator: Does not allocate.
-    pub fn for_each_child(
+    pub fn forEachChild(
         self: *const NodeHeader,
         comptime Ctx: type,
         ctx: Ctx,
         comptime callback: fn (Ctx, u8, *const Node) anyerror!bool,
     ) !void {
-        switch (self.node_type) {
+        switch (self.nodeType) {
             .node4 => {
                 const n4 = @as(*const Node4, @alignCast(@fieldParentPtr("header", self)));
                 for (0..n4.header.num_children) |i| {
@@ -149,7 +149,7 @@ pub const NodeHeader = extern struct {
             .node256 => {
                 const n256 = @as(*const Node256, @alignCast(@fieldParentPtr("header", self)));
                 for (0..256) |b| {
-                    if (!node_is_empty(n256.children[b])) {
+                    if (!nodeIsEmpty(n256.children[b])) {
                         if (!try callback(ctx, @intCast(b), &n256.children[b])) return;
                     }
                 }
@@ -172,11 +172,11 @@ pub const Leaf = struct {
     value: *Value,
     value_owner: ValueOwner = .tree_allocator,
 
-    pub inline fn load_value(self: *const Leaf) *Value {
+    pub inline fn loadValue(self: *const Leaf) *Value {
         return @atomicLoad(*Value, &self.value, .acquire);
     }
 
-    pub inline fn store_value(self: *Leaf, v: *Value) void {
+    pub inline fn storeValue(self: *Leaf, v: *Value) void {
         @atomicStore(*Value, &self.value, v, .monotonic);
     }
 };
@@ -198,47 +198,47 @@ pub const DecodedNode = union(enum) {
     leaf: *Leaf,
 };
 
-pub inline fn node_empty() Node {
+pub inline fn nodeEmpty() Node {
     return 0;
 }
 
-pub inline fn node_internal(h: *NodeHeader) Node {
+pub inline fn nodeInternal(h: *NodeHeader) Node {
     return @intFromPtr(h) | TAG_INTERNAL;
 }
 
-pub inline fn node_leaf(l: *Leaf) Node {
+pub inline fn nodeLeaf(l: *Leaf) Node {
     return @intFromPtr(l) | TAG_LEAF;
 }
 
-pub inline fn node_tag(n: Node) usize {
+pub inline fn nodeTag(n: Node) usize {
     return n & TAG_MASK;
 }
 
-pub inline fn node_is_empty(n: Node) bool {
+pub inline fn nodeIsEmpty(n: Node) bool {
     return n == 0;
 }
 
-pub inline fn node_is_leaf(n: Node) bool {
+pub inline fn nodeIsLeaf(n: Node) bool {
     return (n & TAG_MASK) == TAG_LEAF;
 }
 
-pub inline fn node_is_internal(n: Node) bool {
+pub inline fn nodeIsInternal(n: Node) bool {
     return (n & TAG_MASK) == TAG_INTERNAL;
 }
 
-pub inline fn node_to_internal(n: Node) *NodeHeader {
+pub inline fn nodeToInternal(n: Node) *NodeHeader {
     return @ptrFromInt(n & PTR_MASK);
 }
 
-pub inline fn node_to_leaf(n: Node) *Leaf {
+pub inline fn nodeToLeaf(n: Node) *Leaf {
     return @ptrFromInt(n & PTR_MASK);
 }
 
-pub inline fn node_decode(n: Node) DecodedNode {
-    return switch (node_tag(n)) {
+pub inline fn nodeDecode(n: Node) DecodedNode {
+    return switch (nodeTag(n)) {
         TAG_EMPTY => .{ .empty = {} },
-        TAG_INTERNAL => .{ .internal = node_to_internal(n) },
-        TAG_LEAF => .{ .leaf = node_to_leaf(n) },
+        TAG_INTERNAL => .{ .internal = nodeToInternal(n) },
+        TAG_LEAF => .{ .leaf = nodeToLeaf(n) },
         else => unreachable,
     };
 }
@@ -246,8 +246,8 @@ pub inline fn node_decode(n: Node) DecodedNode {
 /// The maximum child capacity for one ART node class.
 /// Time Complexity: O(1).
 /// Allocator: Does not allocate.
-pub fn capacity_for(node_type: NodeType) u16 {
-    return switch (node_type) {
+pub fn capacityFor(nodeType: NodeType) u16 {
+    return switch (nodeType) {
         .node4 => 4,
         .node16 => 16,
         .node48 => 48,
@@ -258,8 +258,8 @@ pub fn capacity_for(node_type: NodeType) u16 {
 /// Returns the next node class after a grow transition.
 /// Time Complexity: O(1).
 /// Allocator: Does not allocate.
-pub fn next_type(node_type: NodeType) ?NodeType {
-    return switch (node_type) {
+pub fn nextType(nodeType: NodeType) ?NodeType {
+    return switch (nodeType) {
         .node4 => .node16,
         .node16 => .node48,
         .node48 => .node256,
@@ -275,26 +275,26 @@ pub fn next_type(node_type: NodeType) ?NodeType {
 /// Time Complexity: O(1) overhead, copying up to 256 pointers.
 /// Allocator: Allocates exactly one new node using the provided `allocator`. The old node becomes unreachable and is reclaimed with its arena.
 pub fn grow(self: *Node, allocator: std.mem.Allocator) !void {
-    if (!node_is_internal(self.*)) return error.InvalidNodeGrowth;
-    const header = node_to_internal(self.*);
-    switch (header.node_type) {
+    if (!nodeIsInternal(self.*)) return error.InvalidNodeGrowth;
+    const header = nodeToInternal(self.*);
+    switch (header.nodeType) {
         .node4 => {
             const n4: *Node4 = @alignCast(@fieldParentPtr("header", header));
             const n16 = try allocator.create(Node16);
             n16.* = Node16.init();
-            n16.header.copy_meta_from(&n4.header);
+            n16.header.copyMetaFrom(&n4.header);
 
             for (0..n4.header.num_children) |i| {
                 n16.keys[i] = n4.keys[i];
                 n16.children[i] = n4.children[i];
             }
-            @atomicStore(usize, self, node_internal(&n16.header), .monotonic);
+            @atomicStore(usize, self, nodeInternal(&n16.header), .monotonic);
         },
         .node16 => {
             const n16 = @as(*Node16, @alignCast(@fieldParentPtr("header", header)));
             const n48 = try allocator.create(Node48);
             n48.* = Node48.init();
-            n48.header.copy_meta_from(&n16.header);
+            n48.header.copyMetaFrom(&n16.header);
 
             for (0..n16.header.num_children) |i| {
                 const k = n16.keys[i];
@@ -302,13 +302,13 @@ pub fn grow(self: *Node, allocator: std.mem.Allocator) !void {
                 n48.children[i] = n16.children[i];
                 n48.present |= (@as(u64, 1) << @intCast(i));
             }
-            @atomicStore(usize, self, node_internal(&n48.header), .monotonic);
+            @atomicStore(usize, self, nodeInternal(&n48.header), .monotonic);
         },
         .node48 => {
             const n48 = @as(*Node48, @alignCast(@fieldParentPtr("header", header)));
             const n256 = try allocator.create(Node256);
             n256.* = Node256.init();
-            n256.header.copy_meta_from(&n48.header);
+            n256.header.copyMetaFrom(&n48.header);
 
             for (0..256) |i| {
                 const idx = n48.child_index[i];
@@ -316,7 +316,7 @@ pub fn grow(self: *Node, allocator: std.mem.Allocator) !void {
                     n256.children[i] = n48.children[idx];
                 }
             }
-            @atomicStore(usize, self, node_internal(&n256.header), .monotonic);
+            @atomicStore(usize, self, nodeInternal(&n256.header), .monotonic);
         },
         .node256 => return error.TreeFull,
     }
@@ -328,16 +328,16 @@ pub fn grow(self: *Node, allocator: std.mem.Allocator) !void {
 /// it invokes `grow()` first and attempts insertion on the expanded architecture.
 /// Time Complexity: O(1), max 16 byte comparisons or 1 constant-time bitwise ctz operation.
 /// Allocator: May allocate symmetrically by calling `grow(allocator)`.
-pub fn add_child(self: *Node, allocator: std.mem.Allocator, key_byte: u8, child: Node) !void {
-    if (!node_is_internal(self.*)) return error.InvalidNodeType;
-    const header = node_to_internal(self.*);
-    switch (header.node_type) {
+pub fn addChild(self: *Node, allocator: std.mem.Allocator, key_byte: u8, child: Node) !void {
+    if (!nodeIsInternal(self.*)) return error.InvalidNodeType;
+    const header = nodeToInternal(self.*);
+    switch (header.nodeType) {
         .node4 => {
             const n4 = @as(*Node4, @alignCast(@fieldParentPtr("header", header)));
             const count = n4.header.num_children;
             if (count == 4) {
                 try grow(self, allocator);
-                return try add_child(self, allocator, key_byte, child);
+                return try addChild(self, allocator, key_byte, child);
             }
             var i: usize = 0;
             while (i < count) : (i += 1) {
@@ -357,7 +357,7 @@ pub fn add_child(self: *Node, allocator: std.mem.Allocator, key_byte: u8, child:
             const count = n16.header.num_children;
             if (count == 16) {
                 try grow(self, allocator);
-                return try add_child(self, allocator, key_byte, child);
+                return try addChild(self, allocator, key_byte, child);
             }
             var i: usize = 0;
             while (i < count) : (i += 1) {
@@ -376,7 +376,7 @@ pub fn add_child(self: *Node, allocator: std.mem.Allocator, key_byte: u8, child:
             const n48 = @as(*Node48, @alignCast(@fieldParentPtr("header", header)));
             if (n48.header.num_children == 48) {
                 try grow(self, allocator);
-                return try add_child(self, allocator, key_byte, child);
+                return try addChild(self, allocator, key_byte, child);
             }
             const pos = @ctz(~n48.present);
             std.debug.assert(pos < 48);
@@ -400,21 +400,21 @@ pub fn add_child(self: *Node, allocator: std.mem.Allocator, key_byte: u8, child:
 /// Time Complexity: O(1), mapping or compressing up to 256 children arrays.
 /// Allocator: Allocates exactly one smaller node using `allocator`. The old node becomes unreachable and is reclaimed with its arena.
 pub fn shrink(self: *Node, allocator: std.mem.Allocator) !void {
-    if (!node_is_internal(self.*)) return error.InvalidNodeShrink;
-    const header = node_to_internal(self.*);
-    switch (header.node_type) {
+    if (!nodeIsInternal(self.*)) return error.InvalidNodeShrink;
+    const header = nodeToInternal(self.*);
+    switch (header.nodeType) {
         .node4 => {
             const n4 = @as(*Node4, @alignCast(@fieldParentPtr("header", header)));
             if (n4.header.num_children == 0) {
-                @atomicStore(usize, self, node_leaf(n4.header.load_leaf_value().?), .monotonic);
+                @atomicStore(usize, self, nodeLeaf(n4.header.loadLeafValue().?), .monotonic);
                 return;
             }
-            if (n4.header.num_children == 1 and n4.header.load_leaf_value() == null) {
+            if (n4.header.num_children == 1 and n4.header.loadLeafValue() == null) {
                 const child = n4.children[0];
-                if (node_is_leaf(child)) {
+                if (nodeIsLeaf(child)) {
                     @atomicStore(usize, self, child, .monotonic);
                 } else {
-                    const child_header = node_to_internal(child);
+                    const child_header = nodeToInternal(child);
                     const combined_len = @as(usize, n4.header.prefix_len) + child_header.prefix_len + 1;
 
                     var new_prefix: [MAX_PREFIX_LEN]u8 = undefined;
@@ -454,13 +454,13 @@ pub fn shrink(self: *Node, allocator: std.mem.Allocator) !void {
             if (n16.header.num_children <= 4) {
                 const n4 = try allocator.create(Node4);
                 n4.* = Node4.init();
-                n4.header.copy_meta_from(&n16.header);
+                n4.header.copyMetaFrom(&n16.header);
 
                 for (0..n16.header.num_children) |i| {
                     n4.keys[i] = n16.keys[i];
                     n4.children[i] = n16.children[i];
                 }
-                @atomicStore(usize, self, node_internal(&n4.header), .monotonic);
+                @atomicStore(usize, self, nodeInternal(&n4.header), .monotonic);
             }
         },
         .node48 => {
@@ -468,7 +468,7 @@ pub fn shrink(self: *Node, allocator: std.mem.Allocator) !void {
             if (n48.header.num_children <= 16) {
                 const n16 = try allocator.create(Node16);
                 n16.* = Node16.init();
-                n16.header.copy_meta_from(&n48.header);
+                n16.header.copyMetaFrom(&n48.header);
 
                 var child_idx: usize = 0;
                 for (0..256) |i| {
@@ -479,7 +479,7 @@ pub fn shrink(self: *Node, allocator: std.mem.Allocator) !void {
                         child_idx += 1;
                     }
                 }
-                @atomicStore(usize, self, node_internal(&n16.header), .monotonic);
+                @atomicStore(usize, self, nodeInternal(&n16.header), .monotonic);
             }
         },
         .node256 => {
@@ -487,18 +487,18 @@ pub fn shrink(self: *Node, allocator: std.mem.Allocator) !void {
             if (n256.header.num_children <= 48) {
                 const n48 = try allocator.create(Node48);
                 n48.* = Node48.init();
-                n48.header.copy_meta_from(&n256.header);
+                n48.header.copyMetaFrom(&n256.header);
 
                 var pos: usize = 0;
                 for (0..256) |i| {
-                    if (!node_is_empty(n256.children[i])) {
+                    if (!nodeIsEmpty(n256.children[i])) {
                         n48.children[pos] = n256.children[i];
                         n48.child_index[i] = @intCast(pos);
                         n48.present |= (@as(u64, 1) << @intCast(pos));
                         pos += 1;
                     }
                 }
-                @atomicStore(usize, self, node_internal(&n48.header), .monotonic);
+                @atomicStore(usize, self, nodeInternal(&n48.header), .monotonic);
             }
         },
     }
@@ -510,10 +510,10 @@ pub fn shrink(self: *Node, allocator: std.mem.Allocator) !void {
 /// memory density and enforce the compact structure of the Adaptive Radix Tree.
 /// Time Complexity: O(1).
 /// Allocator: May invoke allocation through `shrink(allocator)`.
-pub fn remove_child(self: *Node, allocator: std.mem.Allocator, key_byte: u8) !void {
-    if (!node_is_internal(self.*)) return error.InvalidNodeType;
-    const header = node_to_internal(self.*);
-    switch (header.node_type) {
+pub fn removeChild(self: *Node, allocator: std.mem.Allocator, key_byte: u8) !void {
+    if (!nodeIsInternal(self.*)) return error.InvalidNodeType;
+    const header = nodeToInternal(self.*);
+    switch (header.nodeType) {
         .node4 => {
             const n4 = @as(*Node4, @alignCast(@fieldParentPtr("header", header)));
             const count = n4.header.num_children;
@@ -567,8 +567,8 @@ pub fn remove_child(self: *Node, allocator: std.mem.Allocator, key_byte: u8) !vo
         },
         .node256 => {
             const n256 = @as(*Node256, @alignCast(@fieldParentPtr("header", header)));
-            if (!node_is_empty(n256.children[key_byte])) {
-                @atomicStore(usize, &n256.children[key_byte], node_empty(), .monotonic);
+            if (!nodeIsEmpty(n256.children[key_byte])) {
+                @atomicStore(usize, &n256.children[key_byte], nodeEmpty(), .monotonic);
                 n256.header.num_children -= 1;
                 if (n256.header.num_children <= 48) {
                     try shrink(self, allocator);
@@ -588,7 +588,7 @@ pub const ReservedInternalNode = union(NodeType) {
     /// Returns the node class carried by this reservation.
     /// Time Complexity: O(1).
     /// Allocator: Does not allocate.
-    pub fn node_type(self: ReservedInternalNode) NodeType {
+    pub fn nodeType(self: ReservedInternalNode) NodeType {
         return switch (self) {
             .node4 => .node4,
             .node16 => .node16,
@@ -600,8 +600,8 @@ pub const ReservedInternalNode = union(NodeType) {
     /// Returns this reservation as a live `Node`.
     /// Time Complexity: O(1).
     /// Allocator: Does not allocate.
-    pub fn as_node(self: ReservedInternalNode) Node {
-        return node_internal(self.header());
+    pub fn asNode(self: ReservedInternalNode) Node {
+        return nodeInternal(self.header());
     }
 
     /// Returns the reserved node header pointer.
@@ -617,59 +617,59 @@ pub const ReservedInternalNode = union(NodeType) {
     }
 };
 
-fn promote_into_reserved(self: *Node, promoted: ReservedInternalNode) !void {
-    if (!node_is_internal(self.*)) return error.InvalidNodeGrowth;
-    const header = node_to_internal(self.*);
+fn promoteIntoReserved(self: *Node, promoted: ReservedInternalNode) !void {
+    if (!nodeIsInternal(self.*)) return error.InvalidNodeGrowth;
+    const header = nodeToInternal(self.*);
 
-    switch (header.node_type) {
+    switch (header.nodeType) {
         .node4 => {
-            if (promoted.node_type() != .node16) return error.InvalidNodeGrowth;
+            if (promoted.nodeType() != .node16) return error.InvalidNodeGrowth;
             const n4: *Node4 = @alignCast(@fieldParentPtr("header", header));
             const n16 = promoted.node16;
             n16.* = Node16.init();
             n16.header.num_children = n4.header.num_children;
             n16.header.prefix_len = n4.header.prefix_len;
             n16.header.prefix = n4.header.prefix;
-            n16.header.store_leaf_value(n4.header.load_leaf_value());
+            n16.header.storeLeafValue(n4.header.loadLeafValue());
             for (0..n4.header.num_children) |i| {
                 n16.keys[i] = n4.keys[i];
                 n16.children[i] = n4.children[i];
             }
-            @atomicStore(usize, self, promoted.as_node(), .monotonic);
+            @atomicStore(usize, self, promoted.asNode(), .monotonic);
         },
         .node16 => {
-            if (promoted.node_type() != .node48) return error.InvalidNodeGrowth;
+            if (promoted.nodeType() != .node48) return error.InvalidNodeGrowth;
             const n16 = @as(*Node16, @alignCast(@fieldParentPtr("header", header)));
             const n48 = promoted.node48;
             n48.* = Node48.init();
             n48.header.num_children = n16.header.num_children;
             n48.header.prefix_len = n16.header.prefix_len;
             n48.header.prefix = n16.header.prefix;
-            n48.header.store_leaf_value(n16.header.load_leaf_value());
+            n48.header.storeLeafValue(n16.header.loadLeafValue());
             for (0..n16.header.num_children) |i| {
                 const key = n16.keys[i];
                 n48.child_index[key] = @intCast(i);
                 n48.children[i] = n16.children[i];
                 n48.present |= (@as(u64, 1) << @intCast(i));
             }
-            @atomicStore(usize, self, promoted.as_node(), .monotonic);
+            @atomicStore(usize, self, promoted.asNode(), .monotonic);
         },
         .node48 => {
-            if (promoted.node_type() != .node256) return error.InvalidNodeGrowth;
+            if (promoted.nodeType() != .node256) return error.InvalidNodeGrowth;
             const n48 = @as(*Node48, @alignCast(@fieldParentPtr("header", header)));
             const n256 = promoted.node256;
             n256.* = Node256.init();
             n256.header.num_children = n48.header.num_children;
             n256.header.prefix_len = n48.header.prefix_len;
             n256.header.prefix = n48.header.prefix;
-            n256.header.store_leaf_value(n48.header.load_leaf_value());
+            n256.header.storeLeafValue(n48.header.loadLeafValue());
             for (0..256) |i| {
                 const idx = n48.child_index[i];
                 if (idx != Node48.EMPTY_INDEX) {
                     n256.children[i] = n48.children[idx];
                 }
             }
-            @atomicStore(usize, self, promoted.as_node(), .monotonic);
+            @atomicStore(usize, self, promoted.asNode(), .monotonic);
         },
         .node256 => return error.TreeFull,
     }
@@ -681,17 +681,17 @@ fn promote_into_reserved(self: *Node, promoted: ReservedInternalNode) !void {
 /// Time Complexity: O(1), bounded by local node width.
 ///
 /// Allocator: Does not allocate.
-pub fn add_child_reserved(self: *Node, key_byte: u8, child: Node, promoted: ?ReservedInternalNode) !void {
-    if (!node_is_internal(self.*)) return error.InvalidNodeType;
-    const header = node_to_internal(self.*);
-    if (header.num_children == capacity_for(header.node_type)) {
+pub fn addChildReserved(self: *Node, key_byte: u8, child: Node, promoted: ?ReservedInternalNode) !void {
+    if (!nodeIsInternal(self.*)) return error.InvalidNodeType;
+    const header = nodeToInternal(self.*);
+    if (header.num_children == capacityFor(header.nodeType)) {
         const reserved = promoted orelse return error.InvalidNodeGrowth;
-        try promote_into_reserved(self, reserved);
-        return try add_child_reserved(self, key_byte, child, null);
+        try promoteIntoReserved(self, reserved);
+        return try addChildReserved(self, key_byte, child, null);
     }
 
-    const current = node_to_internal(self.*);
-    switch (current.node_type) {
+    const current = nodeToInternal(self.*);
+    switch (current.nodeType) {
         .node4 => {
             const n4 = @as(*Node4, @alignCast(@fieldParentPtr("header", current)));
             const count = n4.header.num_children;
@@ -735,7 +735,7 @@ pub fn add_child_reserved(self: *Node, key_byte: u8, child: Node, promoted: ?Res
         },
         .node256 => {
             const n256 = @as(*Node256, @alignCast(@fieldParentPtr("header", current)));
-            std.debug.assert(node_is_empty(n256.children[key_byte]));
+            std.debug.assert(nodeIsEmpty(n256.children[key_byte]));
             @atomicStore(usize, &n256.children[key_byte], child, .monotonic);
             n256.header.num_children += 1;
         },
@@ -763,7 +763,7 @@ pub const Node4 = struct {
     /// Finds a child by its key byte. Linear search is fast enough for 4 elements.
     /// Time Complexity: O(1) due to fixed size.
     /// Allocator: Does not allocate.
-    pub fn find_child(self: *const Node4, key_byte: u8) ?*Node {
+    pub fn findChild(self: *const Node4, key_byte: u8) ?*Node {
         const n = @atomicLoad(u16, &self.header.num_children, .acquire);
         for (0..n) |i| {
             if (self.keys[i] == key_byte) {
@@ -795,7 +795,7 @@ pub const Node16 = struct {
     /// Finds a child by its key byte using SIMD.
     /// Time Complexity: O(1) due to fixed size.
     /// Allocator: Does not allocate.
-    pub fn find_child(self: *const Node16, key_byte: u8) ?*Node {
+    pub fn findChild(self: *const Node16, key_byte: u8) ?*Node {
         const mask: @Vector(16, u8) = @splat(key_byte);
         const match_mask = @as(u16, @bitCast(self.keys == mask));
         const n = @atomicLoad(u16, &self.header.num_children, .acquire);
@@ -837,7 +837,7 @@ pub const Node48 = struct {
     /// Finds a child by its key byte using a fixed-size array.
     /// Time Complexity: O(1) due to fixed size.
     /// Allocator: Does not allocate.
-    pub fn find_child(self: *const Node48, key_byte: u8) ?*Node {
+    pub fn findChild(self: *const Node48, key_byte: u8) ?*Node {
         const index = @atomicLoad(u8, &self.child_index[key_byte], .acquire);
         if (index != EMPTY_INDEX) {
             return @constCast(&self.children[index]);
@@ -851,7 +851,7 @@ pub const Node48 = struct {
 /// Memory Footprint: 288 bytes (24 byte header + 256 bytes children + padding).
 pub const Node256 = struct {
     header: NodeHeader,
-    children: [256]Node = [_]Node{node_empty()} ** 256,
+    children: [256]Node = [_]Node{nodeEmpty()} ** 256,
 
     /// Initializes a new, empty Node256 with the correct NodeType header.
     /// Time Complexity: O(1).
@@ -859,23 +859,23 @@ pub const Node256 = struct {
     pub fn init() Node256 {
         return .{
             .header = NodeHeader.init(.node256),
-            .children = [_]Node{node_empty()} ** 256,
+            .children = [_]Node{nodeEmpty()} ** 256,
         };
     }
 
     /// Finds a child by its key byte using a fixed-size array.
     /// Time Complexity: O(1) due to fixed size.
     /// Allocator: Does not allocate.
-    pub fn find_child(self: *const Node256, key_byte: u8) ?*Node {
+    pub fn findChild(self: *const Node256, key_byte: u8) ?*Node {
         const slot = @atomicLoad(usize, &self.children[key_byte], .acquire);
-        if (!node_is_empty(slot)) {
+        if (!nodeIsEmpty(slot)) {
             return @constCast(&self.children[key_byte]);
         }
         return null;
     }
 };
 
-fn create_test_leaf(allocator: std.mem.Allocator, key: []const u8, value_int: i64) !*Leaf {
+fn createTestLeaf(allocator: std.mem.Allocator, key: []const u8, value_int: i64) !*Leaf {
     const stored_key = try allocator.dupe(u8, key);
     const value = try allocator.create(Value);
     value.* = .{ .integer = value_int };
@@ -891,14 +891,14 @@ test "art node structs keep expected header and payload sizes" {
     const testing = std.testing;
 
     const n4 = Node4.init();
-    try testing.expectEqual(NodeType.node4, n4.header.node_type);
+    try testing.expectEqual(NodeType.node4, n4.header.nodeType);
     try testing.expectEqual(@as(usize, 24), @sizeOf(NodeHeader));
     try testing.expectEqual(@as(usize, 64), @sizeOf(Node4));
 
     const n16 = Node16.init();
-    try testing.expectEqual(NodeType.node16, n16.header.node_type);
-    try testing.expectEqual(NodeType.node48, Node48.init().header.node_type);
-    try testing.expectEqual(NodeType.node256, Node256.init().header.node_type);
+    try testing.expectEqual(NodeType.node16, n16.header.nodeType);
+    try testing.expectEqual(NodeType.node48, Node48.init().header.nodeType);
+    try testing.expectEqual(NodeType.node256, Node256.init().header.nodeType);
 }
 
 test "node4 add_child keeps child bytes sorted" {
@@ -909,15 +909,15 @@ test "node4 add_child keeps child bytes sorted" {
 
     const internal = try arena.allocator().create(Node4);
     internal.* = Node4.init();
-    var root = node_internal(&internal.header);
+    var root = nodeInternal(&internal.header);
 
-    try add_child(&root, arena.allocator(), 'm', node_leaf(try create_test_leaf(arena.allocator(), "m", 1)));
-    try add_child(&root, arena.allocator(), 'a', node_leaf(try create_test_leaf(arena.allocator(), "a", 2)));
-    try add_child(&root, arena.allocator(), 'z', node_leaf(try create_test_leaf(arena.allocator(), "z", 3)));
-    try add_child(&root, arena.allocator(), 'b', node_leaf(try create_test_leaf(arena.allocator(), "b", 4)));
+    try addChild(&root, arena.allocator(), 'm', nodeLeaf(try createTestLeaf(arena.allocator(), "m", 1)));
+    try addChild(&root, arena.allocator(), 'a', nodeLeaf(try createTestLeaf(arena.allocator(), "a", 2)));
+    try addChild(&root, arena.allocator(), 'z', nodeLeaf(try createTestLeaf(arena.allocator(), "z", 3)));
+    try addChild(&root, arena.allocator(), 'b', nodeLeaf(try createTestLeaf(arena.allocator(), "b", 4)));
 
-    try testing.expectEqual(NodeType.node4, node_to_internal(root).node_type);
-    const n4 = @as(*Node4, @alignCast(@fieldParentPtr("header", node_to_internal(root))));
+    try testing.expectEqual(NodeType.node4, nodeToInternal(root).nodeType);
+    const n4 = @as(*Node4, @alignCast(@fieldParentPtr("header", nodeToInternal(root))));
     try testing.expectEqualSlices(u8, &.{ 'a', 'b', 'm', 'z' }, n4.keys[0..4]);
 }
 
@@ -929,18 +929,18 @@ test "add_child grows node4 into node16 and preserves children" {
 
     const internal = try arena.allocator().create(Node4);
     internal.* = Node4.init();
-    var root = node_internal(&internal.header);
+    var root = nodeInternal(&internal.header);
 
     for ([_]u8{ 'a', 'b', 'c', 'd', 'e' }, 0..) |byte, index| {
         const key = [_]u8{byte};
-        try add_child(&root, arena.allocator(), byte, node_leaf(try create_test_leaf(arena.allocator(), &key, @intCast(index))));
+        try addChild(&root, arena.allocator(), byte, nodeLeaf(try createTestLeaf(arena.allocator(), &key, @intCast(index))));
     }
 
-    try testing.expectEqual(NodeType.node16, node_to_internal(root).node_type);
-    const n16 = @as(*Node16, @alignCast(@fieldParentPtr("header", node_to_internal(root))));
+    try testing.expectEqual(NodeType.node16, nodeToInternal(root).nodeType);
+    const n16 = @as(*Node16, @alignCast(@fieldParentPtr("header", nodeToInternal(root))));
     try testing.expectEqual(@as(u16, 5), n16.header.num_children);
     for ([_]u8{ 'a', 'b', 'c', 'd', 'e' }) |byte| {
-        try testing.expect(n16.find_child(byte) != null);
+        try testing.expect(n16.findChild(byte) != null);
     }
 }
 
@@ -952,19 +952,19 @@ test "add_child grows node16 into node48 and node48 into node256" {
 
     const internal = try arena.allocator().create(Node4);
     internal.* = Node4.init();
-    var root = node_internal(&internal.header);
+    var root = nodeInternal(&internal.header);
 
     for (0..49) |index| {
         const byte: u8 = @intCast(index);
         const key = [_]u8{byte};
-        try add_child(&root, arena.allocator(), byte, node_leaf(try create_test_leaf(arena.allocator(), &key, @intCast(index))));
+        try addChild(&root, arena.allocator(), byte, nodeLeaf(try createTestLeaf(arena.allocator(), &key, @intCast(index))));
     }
 
-    try testing.expectEqual(NodeType.node256, node_to_internal(root).node_type);
-    const n256 = @as(*Node256, @alignCast(@fieldParentPtr("header", node_to_internal(root))));
+    try testing.expectEqual(NodeType.node256, nodeToInternal(root).nodeType);
+    const n256 = @as(*Node256, @alignCast(@fieldParentPtr("header", nodeToInternal(root))));
     try testing.expectEqual(@as(u16, 49), n256.header.num_children);
     for (0..49) |index| {
-        try testing.expect(n256.find_child(@intCast(index)) != null);
+        try testing.expect(n256.findChild(@intCast(index)) != null);
     }
 }
 
@@ -976,28 +976,28 @@ test "remove_child shrinks node256 into node48 and node48 into node16 and node16
 
     const internal = try arena.allocator().create(Node4);
     internal.* = Node4.init();
-    var root = node_internal(&internal.header);
+    var root = nodeInternal(&internal.header);
 
     for (0..49) |index| {
         const byte: u8 = @intCast(index);
         const key = [_]u8{byte};
-        try add_child(&root, arena.allocator(), byte, node_leaf(try create_test_leaf(arena.allocator(), &key, @intCast(index))));
+        try addChild(&root, arena.allocator(), byte, nodeLeaf(try createTestLeaf(arena.allocator(), &key, @intCast(index))));
     }
 
-    try testing.expectEqual(NodeType.node256, node_to_internal(root).node_type);
+    try testing.expectEqual(NodeType.node256, nodeToInternal(root).nodeType);
 
-    try remove_child(&root, arena.allocator(), 48);
-    try testing.expectEqual(NodeType.node48, node_to_internal(root).node_type);
+    try removeChild(&root, arena.allocator(), 48);
+    try testing.expectEqual(NodeType.node48, nodeToInternal(root).nodeType);
 
     for (16..48) |index| {
-        try remove_child(&root, arena.allocator(), @intCast(index));
+        try removeChild(&root, arena.allocator(), @intCast(index));
     }
-    try testing.expectEqual(NodeType.node16, node_to_internal(root).node_type);
+    try testing.expectEqual(NodeType.node16, nodeToInternal(root).nodeType);
 
     for (4..17) |index| {
-        try remove_child(&root, arena.allocator(), @intCast(index));
+        try removeChild(&root, arena.allocator(), @intCast(index));
     }
-    try testing.expectEqual(NodeType.node4, node_to_internal(root).node_type);
+    try testing.expectEqual(NodeType.node4, nodeToInternal(root).nodeType);
 }
 
 test "shrink on a one-child node4 promotes a leaf child" {
@@ -1008,14 +1008,14 @@ test "shrink on a one-child node4 promotes a leaf child" {
 
     const internal = try arena.allocator().create(Node4);
     internal.* = Node4.init();
-    var root = node_internal(&internal.header);
-    const leaf = try create_test_leaf(arena.allocator(), "alpha", 1);
-    try add_child(&root, arena.allocator(), 'a', node_leaf(leaf));
+    var root = nodeInternal(&internal.header);
+    const leaf = try createTestLeaf(arena.allocator(), "alpha", 1);
+    try addChild(&root, arena.allocator(), 'a', nodeLeaf(leaf));
 
     try shrink(&root, arena.allocator());
 
-    try testing.expect(node_is_leaf(root));
-    try testing.expectEqualStrings("alpha", node_to_leaf(root).key);
+    try testing.expect(nodeIsLeaf(root));
+    try testing.expectEqualStrings("alpha", nodeToLeaf(root).key);
 }
 
 test "shrink on a one-child node4 merges the child prefix into the remaining internal node" {
@@ -1035,17 +1035,17 @@ test "shrink on a one-child node4 merges the child prefix into the remaining int
     child.header.prefix_len = 2;
     child.header.prefix[0] = 'd';
     child.header.prefix[1] = 'e';
-    var child_node = node_internal(&child.header);
-    try add_child(&child_node, arena.allocator(), 'f', node_leaf(try create_test_leaf(arena.allocator(), "abxdef", 1)));
+    var child_node = nodeInternal(&child.header);
+    try addChild(&child_node, arena.allocator(), 'f', nodeLeaf(try createTestLeaf(arena.allocator(), "abxdef", 1)));
 
-    var root = node_internal(&parent.header);
-    try add_child(&root, arena.allocator(), 'x', node_internal(&child.header));
+    var root = nodeInternal(&parent.header);
+    try addChild(&root, arena.allocator(), 'x', nodeInternal(&child.header));
     try shrink(&root, arena.allocator());
 
-    try testing.expect(node_is_internal(root));
-    try testing.expectEqual(@as(u16, 5), node_to_internal(root).prefix_len);
-    try testing.expectEqualSlices(u8, "abxde", node_to_internal(root).prefix[0..5]);
-    const merged = @as(*Node4, @alignCast(@fieldParentPtr("header", node_to_internal(root))));
+    try testing.expect(nodeIsInternal(root));
+    try testing.expectEqual(@as(u16, 5), nodeToInternal(root).prefix_len);
+    try testing.expectEqualSlices(u8, "abxde", nodeToInternal(root).prefix[0..5]);
+    const merged = @as(*Node4, @alignCast(@fieldParentPtr("header", nodeToInternal(root))));
     try testing.expectEqual(@as(u16, 1), merged.header.num_children);
     try testing.expectEqual(@as(u8, 'f'), merged.keys[0]);
 }

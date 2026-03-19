@@ -21,10 +21,10 @@ const TtlCleanup = enum {
 /// Time Complexity: O(k), where `k` is `key.len`.
 ///
 /// Allocator: Does not allocate.
-pub fn key_is_visible_unlocked(shard: *const runtime_shard.Shard, key: []const u8, now: i64) bool {
+pub fn keyIsVisibleUnlocked(shard: *const runtime_shard.Shard, key: []const u8, now: i64) bool {
     if (shard.ttl_index.count() == 0) return true;
-    const stored_expire_at = internal_ttl_index.get_expire_at(shard, key) orelse return true;
-    return !is_expired(stored_expire_at, now);
+    const stored_expire_at = internal_ttl_index.getExpireAt(shard, key) orelse return true;
+    return !isExpired(stored_expire_at, now);
 }
 
 /// Returns whether one TTL timestamp should be treated as expired.
@@ -32,8 +32,8 @@ pub fn key_is_visible_unlocked(shard: *const runtime_shard.Shard, key: []const u
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-pub fn is_expired(expire_at_seconds: i64, now: i64) bool {
-    return internal_ttl_index.is_expired(expire_at_seconds, now);
+pub fn isExpired(expire_at_seconds: i64, now: i64) bool {
+    return internal_ttl_index.isExpired(expire_at_seconds, now);
 }
 
 /// Sets or clears expiration for one plain key.
@@ -43,57 +43,57 @@ pub fn is_expired(expire_at_seconds: i64, now: i64) bool {
 /// Allocator: Uses the shard base allocator when preparing a new TTL entry and may allocate delegated WAL record scratch for durable live mutations.
 ///
 /// Thread Safety: Acquires the exclusive side of the global visibility gate before taking the target shard's exclusive lock, then appends the matching live WAL record inside that same window before publishing the TTL change.
-pub fn expire_at(
+pub fn expireAt(
     state: *runtime_state.DatabaseState,
     key: []const u8,
     unix_seconds: ?i64,
 ) error_mod.EngineError!bool {
-    internal_mutate.validate_key(key) catch |err| switch (err) {
+    internal_mutate.validateKey(key) catch |err| switch (err) {
         error.EmptyKey, error.KeyTooLarge => return error.KeyTooLarge,
     };
 
-    const shard_idx = runtime_shard.get_shard_index(key);
+    const shard_idx = runtime_shard.getShardIndex(key);
     const shard = &state.shards[shard_idx];
 
-    shard.visibility_gate.lock_exclusive();
-    defer shard.visibility_gate.unlock_exclusive();
+    shard.visibility_gate.lockExclusive();
+    defer shard.visibility_gate.unlockExclusive();
 
     shard.lock.lock();
     defer shard.lock.unlock();
 
-    const now = runtime_shard.unix_now();
-    if (!internal_mutate.key_exists_unlocked(shard, key)) {
-        internal_ttl_index.clear_ttl_entry(shard, key);
+    const now = runtime_shard.unixNow();
+    if (!internal_mutate.keyExistsUnlocked(shard, key)) {
+        internal_ttl_index.clearTtlEntry(shard, key);
         return false;
     }
 
-    if (internal_ttl_index.get_expire_at(shard, key)) |existing_expire_at| {
-        if (is_expired(existing_expire_at, now)) {
-            _ = try internal_mutate.remove_stored_value_unlocked(shard, key);
-            internal_ttl_index.clear_ttl_entry(shard, key);
+    if (internal_ttl_index.getExpireAt(shard, key)) |existing_expire_at| {
+        if (isExpired(existing_expire_at, now)) {
+            _ = try internal_mutate.removeStoredValueUnlocked(shard, key);
+            internal_ttl_index.clearTtlEntry(shard, key);
             return false;
         }
     }
 
     if (unix_seconds) |expire_at_seconds| {
         if (expire_at_seconds <= now) {
-            try durability.append_delete_if_enabled(state, key);
-            _ = try internal_mutate.remove_stored_value_unlocked(shard, key);
-            internal_ttl_index.clear_ttl_entry(shard, key);
+            try durability.appendDeleteIfEnabled(state, key);
+            _ = try internal_mutate.removeStoredValueUnlocked(shard, key);
+            internal_ttl_index.clearTtlEntry(shard, key);
             return true;
         }
 
-        var prepared_ttl = try internal_ttl_index.prepare_set_ttl_entry(shard, key);
+        var prepared_ttl = try internal_ttl_index.prepareSetTtlEntry(shard, key);
         errdefer prepared_ttl.deinit(state.base_allocator);
 
-        try durability.append_expire_if_enabled(state, key, expire_at_seconds);
-        internal_ttl_index.apply_prepared_set_ttl_entry_unlocked(shard, key, expire_at_seconds, prepared_ttl);
+        try durability.appendExpireIfEnabled(state, key, expire_at_seconds);
+        internal_ttl_index.applyPreparedSetTtlEntryUnlocked(shard, key, expire_at_seconds, prepared_ttl);
         return true;
     }
 
     const stored = shard.tree.lookup(key).?;
-    try durability.append_put_if_enabled(state, key, stored);
-    internal_ttl_index.clear_ttl_entry(shard, key);
+    try durability.appendPutIfEnabled(state, key, stored);
+    internal_ttl_index.clearTtlEntry(shard, key);
     return true;
 }
 
@@ -102,17 +102,17 @@ pub fn expire_at(
 /// Time Complexity: O(n + k), where `n` is `key.len` for shard routing and `k` is shard-local ART lookup plus optional teardown work.
 ///
 /// Allocator: Does not allocate.
-fn try_cleanup_if_possible(
+fn tryCleanupIfPossible(
     state: *runtime_state.DatabaseState,
     key: []const u8,
     cleanup: TtlCleanup,
 ) void {
     if (cleanup == .none) return;
-    const shard_idx = runtime_shard.get_shard_index(key);
+    const shard_idx = runtime_shard.getShardIndex(key);
     const shard = &state.shards[shard_idx];
 
-    if (!shard.visibility_gate.try_lock_exclusive()) return;
-    defer shard.visibility_gate.unlock_exclusive();
+    if (!shard.visibility_gate.tryLockExclusive()) return;
+    defer shard.visibility_gate.unlockExclusive();
 
     shard.lock.lock();
     defer shard.lock.unlock();
@@ -120,20 +120,20 @@ fn try_cleanup_if_possible(
     switch (cleanup) {
         .none => {},
         .missing_key => {
-            if (!internal_mutate.key_exists_unlocked(shard, key)) internal_ttl_index.clear_ttl_entry(shard, key);
+            if (!internal_mutate.keyExistsUnlocked(shard, key)) internal_ttl_index.clearTtlEntry(shard, key);
         },
         .expired_key => {
-            if (!internal_mutate.key_exists_unlocked(shard, key)) {
-                internal_ttl_index.clear_ttl_entry(shard, key);
+            if (!internal_mutate.keyExistsUnlocked(shard, key)) {
+                internal_ttl_index.clearTtlEntry(shard, key);
                 return;
             }
 
-            const now = runtime_shard.unix_now();
-            const stored_expire_at = internal_ttl_index.get_expire_at(shard, key) orelse return;
-            if (!is_expired(stored_expire_at, now)) return;
+            const now = runtime_shard.unixNow();
+            const stored_expire_at = internal_ttl_index.getExpireAt(shard, key) orelse return;
+            if (!isExpired(stored_expire_at, now)) return;
 
-            _ = internal_mutate.remove_stored_value_unlocked(shard, key) catch return;
-            internal_ttl_index.clear_ttl_entry(shard, key);
+            _ = internal_mutate.removeStoredValueUnlocked(shard, key) catch return;
+            internal_ttl_index.clearTtlEntry(shard, key);
         },
     }
 }
@@ -146,30 +146,30 @@ fn try_cleanup_if_possible(
 ///
 /// Thread Safety: Reads under the shared visibility gate and only performs lazy cleanup afterward if the exclusive gate can be acquired immediately.
 pub fn ttl(state: *runtime_state.DatabaseState, key: []const u8) error_mod.EngineError!i64 {
-    internal_mutate.validate_key(key) catch |err| switch (err) {
+    internal_mutate.validateKey(key) catch |err| switch (err) {
         error.EmptyKey, error.KeyTooLarge => return error.KeyTooLarge,
     };
 
     var cleanup: TtlCleanup = .none;
     const result = blk: {
-        const shard_idx = runtime_shard.get_shard_index(key);
+        const shard_idx = runtime_shard.getShardIndex(key);
         const shard = &state.shards[shard_idx];
 
-        shard.visibility_gate.lock_shared();
-        defer shard.visibility_gate.unlock_shared();
+        shard.visibility_gate.lockShared();
+        defer shard.visibility_gate.unlockShared();
 
-        const now = runtime_shard.unix_now();
+        const now = runtime_shard.unixNow();
 
         shard.lock.lockShared();
         defer shard.lock.unlockShared();
 
-        if (!internal_mutate.key_exists_unlocked(shard, key)) {
+        if (!internal_mutate.keyExistsUnlocked(shard, key)) {
             cleanup = .missing_key;
             break :blk @as(i64, -2);
         }
 
-        const stored_expire_at = internal_ttl_index.get_expire_at(shard, key) orelse break :blk @as(i64, -1);
-        if (is_expired(stored_expire_at, now)) {
+        const stored_expire_at = internal_ttl_index.getExpireAt(shard, key) orelse break :blk @as(i64, -1);
+        if (isExpired(stored_expire_at, now)) {
             cleanup = .expired_key;
             break :blk @as(i64, -2);
         }
@@ -177,7 +177,7 @@ pub fn ttl(state: *runtime_state.DatabaseState, key: []const u8) error_mod.Engin
         break :blk stored_expire_at - now;
     };
 
-    try_cleanup_if_possible(state, key, cleanup);
+    tryCleanupIfPossible(state, key, cleanup);
     return result;
 }
 
@@ -191,10 +191,10 @@ pub fn ttl(state: *runtime_state.DatabaseState, key: []const u8) error_mod.Engin
 /// Ownership: Does not append WAL records. Durability of expiration is encoded in
 /// the original EXPIRE record; the sweep is a memory-reclaim optimization only.
 ///
-/// Thread Safety: Uses `try_lock_exclusive` on the shard visibility gate and skips
+/// Thread Safety: Uses `tryLockExclusive` on the shard visibility gate and skips
 /// the shard if the gate cannot be acquired immediately. Brackets ART modifications
 /// with the shard seqlock to protect concurrent lock-free GET readers.
-pub fn sweep_expired_entries_for_shard(
+pub fn sweepExpiredEntriesForShard(
     state: *runtime_state.DatabaseState,
     shard_idx: usize,
     allocator: std.mem.Allocator,
@@ -205,8 +205,8 @@ pub fn sweep_expired_entries_for_shard(
     if (!shard.has_ttl_entries) return;
 
     // Try to acquire exclusive visibility gate. Skip if busy, will retry next interval
-    if (!shard.visibility_gate.try_lock_exclusive()) return;
-    defer shard.visibility_gate.unlock_exclusive();
+    if (!shard.visibility_gate.tryLockExclusive()) return;
+    defer shard.visibility_gate.unlockExclusive();
 
     shard.lock.lock();
     defer shard.lock.unlock();
@@ -214,7 +214,7 @@ pub fn sweep_expired_entries_for_shard(
     // Re-check under lock: another writer may have cleared all entries first
     if (!shard.has_ttl_entries) return;
 
-    const now = runtime_shard.unix_now();
+    const now = runtime_shard.unixNow();
 
     // First pass: collect keys of expired entries. Do not modify the map during iteration
     var expired = std.ArrayList([]const u8).empty;
@@ -222,7 +222,7 @@ pub fn sweep_expired_entries_for_shard(
 
     var it = shard.ttl_index.iterator();
     while (it.next()) |entry| {
-        if (is_expired(entry.value_ptr.*, now)) {
+        if (isExpired(entry.value_ptr.*, now)) {
             expired.append(allocator, entry.key_ptr.*) catch continue;
         }
     }
@@ -238,8 +238,8 @@ pub fn sweep_expired_entries_for_shard(
 
     for (expired.items) |key| {
         // Remove from ART first (may free heap-owned value memory)
-        _ = internal_mutate.remove_stored_value_unlocked(shard, key) catch {};
+        _ = internal_mutate.removeStoredValueUnlocked(shard, key) catch {};
         // Clear TTL index entry and free owned key bytes
-        internal_ttl_index.clear_ttl_entry(shard, key);
+        internal_ttl_index.clearTtlEntry(shard, key);
     }
 }

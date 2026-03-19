@@ -28,24 +28,24 @@ pub const MAX_KEY_LEN: usize = 4_096;
 pub fn put(state: *runtime_state.DatabaseState, key: []const u8, value: *const types.Value) error_mod.EngineError!void {
     if (key.len == 0 or key.len > MAX_KEY_LEN) return error.KeyTooLarge;
 
-    const shard_idx = runtime_shard.get_shard_index(key);
+    const shard_idx = runtime_shard.getShardIndex(key);
     const shard = &state.shards[shard_idx];
 
-    shard.visibility_gate.lock_shared();
-    defer shard.visibility_gate.unlock_shared();
+    shard.visibility_gate.lockShared();
+    defer shard.visibility_gate.unlockShared();
 
     shard.lock.lock();
     defer shard.lock.unlock();
 
     // Fast path: key already exists - overwrite without seq bracket.
-    // No ART structural changes; leaf.store_value() provides release ordering.
-    if (try internal_mutate.try_overwrite_if_exists_unlocked(shard, key, value)) |outcome| {
-        try durability.append_put_if_enabled(state, key, value);
-        internal_ttl_index.clear_ttl_entry(shard, key);
-        state.record_operation(.put, 1);
-        state.record_operation(.overwrite, 1);
+    // No ART structural changes; leaf.storeValue() provides release ordering.
+    if (try internal_mutate.tryOverwriteIfExistsUnlocked(shard, key, value)) |outcome| {
+        try durability.appendPutIfEnabled(state, key, value);
+        internal_ttl_index.clearTtlEntry(shard, key);
+        state.recordOperation(.put, 1);
+        state.recordOperation(.overwrite, 1);
         if (outcome.previous_heavy_bytes != 0 or outcome.previous_heavy_event) {
-            state.record_heavy_overwrite_retained_bytes(
+            state.recordHeavyOverwriteRetainedBytes(
                 shard_idx,
                 outcome.previous_heavy_bytes,
                 if (outcome.previous_heavy_event) 1 else 0,
@@ -61,15 +61,15 @@ pub fn put(state: *runtime_state.DatabaseState, key: []const u8, value: *const t
     shard.seq.store(seq0 + 1, .release);
     defer shard.seq.store(seq0 + 2, .release);
 
-    try durability.append_put_if_enabled(state, key, value);
-    const outcome = try internal_mutate.upsert_value_unlocked_with_outcome(shard, key, value);
-    internal_ttl_index.clear_ttl_entry(shard, key);
-    state.record_operation(.put, 1);
+    try durability.appendPutIfEnabled(state, key, value);
+    const outcome = try internal_mutate.upsertValueUnlockedWithOutcome(shard, key, value);
+    internal_ttl_index.clearTtlEntry(shard, key);
+    state.recordOperation(.put, 1);
     // outcome.overwritten will be false here since find_leaf returned null above,
     // but keep the check for defensiveness.
-    if (outcome.overwritten) state.record_operation(.overwrite, 1);
+    if (outcome.overwritten) state.recordOperation(.overwrite, 1);
     if (outcome.overwritten and (outcome.previous_heavy_bytes != 0 or outcome.previous_heavy_event)) {
-        state.record_heavy_overwrite_retained_bytes(
+        state.recordHeavyOverwriteRetainedBytes(
             shard_idx,
             outcome.previous_heavy_bytes,
             if (outcome.previous_heavy_event) 1 else 0,
@@ -88,7 +88,7 @@ pub fn put(state: *runtime_state.DatabaseState, key: []const u8, value: *const t
 /// Thread Safety: Safe for concurrent use with reads and scans; acquires shard-local shared visibility gates and shard-exclusive locks per touched shard.
 ///
 /// Durability Semantics: Writes are non-atomic as a group. Replays may recover any durable prefix if a failure happens mid-apply.
-pub fn put_group(state: *runtime_state.DatabaseState, writes: []const types.PutWrite) error_mod.EngineError!void {
+pub fn putGroup(state: *runtime_state.DatabaseState, writes: []const types.PutWrite) error_mod.EngineError!void {
     if (writes.len == 0) return;
 
     var wal_writes = state.base_allocator.alloc(durability.PutBatchWrite, writes.len) catch return error.OutOfMemory;
@@ -98,10 +98,10 @@ pub fn put_group(state: *runtime_state.DatabaseState, writes: []const types.PutW
     for (writes, 0..) |write_entry, i| {
         if (write_entry.key.len == 0 or write_entry.key.len > MAX_KEY_LEN) return error.KeyTooLarge;
         wal_writes[i] = .{ .key = write_entry.key, .value = write_entry.value };
-        touched.set(runtime_shard.get_shard_index(write_entry.key));
+        touched.set(runtime_shard.getShardIndex(write_entry.key));
     }
 
-    try durability.append_put_group_if_enabled(state, wal_writes);
+    try durability.appendPutGroupIfEnabled(state, wal_writes);
 
     var applied: u64 = 0;
     var overwritten: u64 = 0;
@@ -109,15 +109,15 @@ pub fn put_group(state: *runtime_state.DatabaseState, writes: []const types.PutW
         if (!touched.isSet(shard_idx)) continue;
 
         const shard = &state.shards[shard_idx];
-        shard.visibility_gate.lock_shared();
+        shard.visibility_gate.lockShared();
         shard.lock.lock();
 
         // Pre-scan: check if any write for this shard needs a structural insert.
         // Structural insert = key does not yet exist in the ART.
         var needs_bracket = false;
         for (writes) |write_entry| {
-            if (runtime_shard.get_shard_index(write_entry.key) != shard_idx) continue;
-            if (shard.tree.find_leaf_for_exact_key(write_entry.key) == null) {
+            if (runtime_shard.getShardIndex(write_entry.key) != shard_idx) continue;
+            if (shard.tree.findLeafForExactKey(write_entry.key) == null) {
                 needs_bracket = true;
                 break;
             }
@@ -131,37 +131,37 @@ pub fn put_group(state: *runtime_state.DatabaseState, writes: []const types.PutW
         errdefer {
             if (needs_bracket) shard.seq.store(seq0 + 2, .release);
             shard.lock.unlock();
-            shard.visibility_gate.unlock_shared();
+            shard.visibility_gate.unlockShared();
         }
 
         var retained_heavy_bytes: u64 = 0;
         var heavy_overwrite_events: u64 = 0;
 
         for (writes) |write_entry| {
-            if (runtime_shard.get_shard_index(write_entry.key) != shard_idx) continue;
-            const outcome = try internal_mutate.upsert_value_unlocked_with_outcome(shard, write_entry.key, write_entry.value);
+            if (runtime_shard.getShardIndex(write_entry.key) != shard_idx) continue;
+            const outcome = try internal_mutate.upsertValueUnlockedWithOutcome(shard, write_entry.key, write_entry.value);
             retained_heavy_bytes += outcome.previous_heavy_bytes;
             if (outcome.previous_heavy_event) heavy_overwrite_events += 1;
 
             if (outcome.overwritten) {
                 overwritten += 1;
             }
-            internal_ttl_index.clear_ttl_entry(shard, write_entry.key);
+            internal_ttl_index.clearTtlEntry(shard, write_entry.key);
             applied += 1;
         }
 
         if (retained_heavy_bytes != 0 or heavy_overwrite_events != 0) {
-            state.record_heavy_overwrite_retained_bytes(shard_idx, retained_heavy_bytes, heavy_overwrite_events);
+            state.recordHeavyOverwriteRetainedBytes(shard_idx, retained_heavy_bytes, heavy_overwrite_events);
         }
 
         if (needs_bracket) shard.seq.store(seq0 + 2, .release);
         shard.lock.unlock();
-        shard.visibility_gate.unlock_shared();
+        shard.visibility_gate.unlockShared();
     }
 
     if (applied != @as(u64, @intCast(writes.len))) unreachable;
-    state.record_operation(.put, applied);
-    state.record_operation(.overwrite, overwritten);
+    state.recordOperation(.put, applied);
+    state.recordOperation(.overwrite, overwritten);
 }
 
 /// Deletes one plain key/value pair when present.
@@ -176,11 +176,11 @@ pub fn put_group(state: *runtime_state.DatabaseState, writes: []const types.PutW
 pub fn delete(state: *runtime_state.DatabaseState, key: []const u8) error_mod.EngineError!bool {
     if (key.len == 0 or key.len > MAX_KEY_LEN) return error.KeyTooLarge;
 
-    const shard_idx = runtime_shard.get_shard_index(key);
+    const shard_idx = runtime_shard.getShardIndex(key);
     const shard = &state.shards[shard_idx];
 
-    shard.visibility_gate.lock_shared();
-    defer shard.visibility_gate.unlock_shared();
+    shard.visibility_gate.lockShared();
+    defer shard.visibility_gate.unlockShared();
 
     shard.lock.lock();
     defer shard.lock.unlock();
@@ -189,24 +189,24 @@ pub fn delete(state: *runtime_state.DatabaseState, key: []const u8) error_mod.En
     shard.seq.store(seq0 + 1, .release);
     defer shard.seq.store(seq0 + 2, .release);
 
-    if (!internal_mutate.key_exists_unlocked(shard, key)) {
-        internal_ttl_index.clear_ttl_entry(shard, key);
+    if (!internal_mutate.keyExistsUnlocked(shard, key)) {
+        internal_ttl_index.clearTtlEntry(shard, key);
         return false;
     }
 
-    const now = runtime_shard.unix_now();
-    if (!expiration.key_is_visible_unlocked(shard, key, now)) {
-        _ = try internal_mutate.remove_stored_value_unlocked(shard, key);
-        internal_ttl_index.clear_ttl_entry(shard, key);
+    const now = runtime_shard.unixNow();
+    if (!expiration.keyIsVisibleUnlocked(shard, key, now)) {
+        _ = try internal_mutate.removeStoredValueUnlocked(shard, key);
+        internal_ttl_index.clearTtlEntry(shard, key);
         return false;
     }
 
-    try durability.append_delete_if_enabled(state, key);
+    try durability.appendDeleteIfEnabled(state, key);
 
-    _ = try internal_mutate.remove_stored_value_unlocked(shard, key);
-    internal_ttl_index.clear_ttl_entry(shard, key);
+    _ = try internal_mutate.removeStoredValueUnlocked(shard, key);
+    internal_ttl_index.clearTtlEntry(shard, key);
 
-    state.record_operation(.delete, 1);
+    state.recordOperation(.delete, 1);
     return true;
 }
 
@@ -233,7 +233,7 @@ pub fn delete(state: *runtime_state.DatabaseState, key: []const u8) error_mod.En
 /// Thread Safety: Acquires the shared visibility gate and shard-exclusive
 /// lock per shard. Uses the seqlock bracket for ART modifications so
 /// concurrent lock-free GET readers observe a consistent state.
-pub fn delete_prefix(
+pub fn deletePrefix(
     state: *runtime_state.DatabaseState,
     prefix: []const u8,
     allocator: std.mem.Allocator,
@@ -249,8 +249,8 @@ pub fn delete_prefix(
         }
 
         {
-            shard.visibility_gate.lock_shared();
-            defer shard.visibility_gate.unlock_shared();
+            shard.visibility_gate.lockShared();
+            defer shard.visibility_gate.unlockShared();
 
             shard.lock.lockShared();
             defer shard.lock.unlockShared();
@@ -260,12 +260,12 @@ pub fn delete_prefix(
 
             shard.tree.scan(prefix, allocator, &scan_results) catch return error.OutOfMemory;
 
-            const now = runtime_shard.unix_now();
+            const now = runtime_shard.unixNow();
             for (scan_results.items) |entry| {
                 // Skip keys that are TTL-expired and already invisible
                 if (shard.has_ttl_entries) {
-                    if (internal_ttl_index.get_expire_at(shard, entry.key)) |exp| {
-                        if (expiration.is_expired(exp, now)) continue;
+                    if (internal_ttl_index.getExpireAt(shard, entry.key)) |exp| {
+                        if (expiration.isExpired(exp, now)) continue;
                     }
                 }
                 // Dupe the key so we own it after the shared lock releases
@@ -282,13 +282,13 @@ pub fn delete_prefix(
         // Append WAL DELETE records for all matching keys before modifying in-memory state
         // If any WAL append fails, return immediately, no in-memory changes have been made yet
         for (matching.items) |key| {
-            try durability.append_delete_if_enabled(state, key);
+            try durability.appendDeleteIfEnabled(state, key);
         }
 
         // Remove from ART and TTL index under exclusive shard lock + seqlock bracket
         {
-            shard.visibility_gate.lock_shared();
-            defer shard.visibility_gate.unlock_shared();
+            shard.visibility_gate.lockShared();
+            defer shard.visibility_gate.unlockShared();
 
             shard.lock.lock();
             defer shard.lock.unlock();
@@ -298,8 +298,8 @@ pub fn delete_prefix(
             defer shard.seq.store(seq0 + 2, .release);
 
             for (matching.items) |key| {
-                _ = internal_mutate.remove_stored_value_unlocked(shard, key) catch {};
-                internal_ttl_index.clear_ttl_entry(shard, key);
+                _ = internal_mutate.removeStoredValueUnlocked(shard, key) catch {};
+                internal_ttl_index.clearTtlEntry(shard, key);
             }
         }
 
@@ -307,7 +307,7 @@ pub fn delete_prefix(
     }
 
     if (total_deleted > 0) {
-        state.record_operation(.delete, total_deleted);
+        state.recordOperation(.delete, total_deleted);
     }
 
     return total_deleted;

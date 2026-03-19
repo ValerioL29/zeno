@@ -36,22 +36,22 @@ const FixedBorrowedShardHeap = struct {
     fn add(self: *@This(), head: BorrowedShardHead) void {
         std.debug.assert(self.len < runtime_shard.NUM_SHARDS);
         self.items[self.len] = head;
-        self.sift_up(self.len);
+        self.siftUp(self.len);
         self.len += 1;
     }
 
-    fn remove_min(self: *@This()) ?BorrowedShardHead {
+    fn removeMin(self: *@This()) ?BorrowedShardHead {
         if (self.len == 0) return null;
         const min = self.items[0];
         self.len -= 1;
         if (self.len > 0) {
             self.items[0] = self.items[self.len];
-            self.sift_down(0);
+            self.siftDown(0);
         }
         return min;
     }
 
-    fn sift_up(self: *@This(), start: usize) void {
+    fn siftUp(self: *@This(), start: usize) void {
         var idx = start;
         while (idx > 0) {
             const parent = (idx - 1) / 2;
@@ -63,7 +63,7 @@ const FixedBorrowedShardHeap = struct {
         }
     }
 
-    fn sift_down(self: *@This(), start: usize) void {
+    fn siftDown(self: *@This(), start: usize) void {
         var idx = start;
         while (true) {
             const left = 2 * idx + 1;
@@ -85,7 +85,7 @@ const FixedBorrowedShardHeap = struct {
 /// Orders shard heads by key for the priority queue.
 ///
 /// Time Complexity: O(k), where k is the common prefix length of the keys.
-fn shard_head_order(_: void, left: ShardHead, right: ShardHead) std.math.Order {
+fn shardHeadOrder(_: void, left: ShardHead, right: ShardHead) std.math.Order {
     return std.mem.order(u8, left.entry.key, right.entry.key);
 }
 
@@ -94,7 +94,7 @@ fn shard_head_order(_: void, left: ShardHead, right: ShardHead) std.math.Order {
 /// Time Complexity: O(1) plus deallocation cost.
 ///
 /// Allocator: Frees key and value storage through `allocator`.
-fn free_entry(allocator: std.mem.Allocator, entry: types.ScanEntry) void {
+fn freeEntry(allocator: std.mem.Allocator, entry: types.ScanEntry) void {
     allocator.free(entry.key);
     const owned_value: *types.Value = @constCast(entry.value);
     owned_value.deinit(allocator);
@@ -106,7 +106,7 @@ fn free_entry(allocator: std.mem.Allocator, entry: types.ScanEntry) void {
 /// Time Complexity: O(k + v), where k is key length and v is value size.
 ///
 /// Allocator: Allocates new key and value storage through `allocator`.
-fn clone_entry(
+fn cloneEntry(
     allocator: std.mem.Allocator,
     key: []const u8,
     value: *const types.Value,
@@ -127,7 +127,7 @@ fn clone_entry(
 /// Returns true if the range start is not less than the range end.
 ///
 /// Time Complexity: O(k).
-fn range_is_empty(range: types.KeyRange) bool {
+fn rangeIsEmpty(range: types.KeyRange) bool {
     const start = range.start orelse return false;
     const end = range.end orelse return false;
     return !std.mem.lessThan(u8, start, end);
@@ -148,7 +148,7 @@ const RangeVisitCtx = struct {
 /// Fetches at most one visible entry with the prefix from one shard.
 ///
 /// Time Complexity: O(k), where k is key length.
-fn fetch_one_prefix_entry(
+fn fetchOnePrefixEntry(
     allocator: std.mem.Allocator,
     scratch: *std.ArrayList(art.ScanEntry),
     shard: *const runtime_shard.Shard,
@@ -156,7 +156,7 @@ fn fetch_one_prefix_entry(
     start_after_key: ?[]const u8,
 ) error_mod.EngineError!?art.ScanEntry {
     scratch.clearRetainingCapacity();
-    _ = shard.tree.scan_from(prefix, start_after_key, allocator, scratch, 1) catch |err| switch (err) {
+    _ = shard.tree.scanFrom(prefix, start_after_key, allocator, scratch, 1) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
@@ -167,15 +167,15 @@ fn fetch_one_prefix_entry(
 /// Fetches at most one visible entry inside the range from one shard.
 ///
 /// Time Complexity: O(k), where k is key length.
-fn fetch_one_range_entry(
+fn fetchOneRangeEntry(
     shard: *const runtime_shard.Shard,
     range: types.KeyRange,
     start_after_key: ?[]const u8,
 ) error_mod.EngineError!?art.ScanEntry {
-    if (range_is_empty(range)) return null;
+    if (rangeIsEmpty(range)) return null;
 
     var visit_ctx = RangeVisitCtx{};
-    _ = shard.tree.scan_range_visit_from(.{
+    _ = shard.tree.scanRangeVisitFrom(.{
         .start = range.start,
         .end = range.end,
     }, start_after_key, &visit_ctx, RangeVisitCtx.visit, 1) catch |err| switch (err) {
@@ -190,7 +190,7 @@ fn fetch_one_range_entry(
 /// Time Complexity: O(v * k), where v is the number of version skips and k is key length.
 ///
 /// Allocator: Clones the matched entry into owned storage through `allocator`.
-fn fetch_next_visible_head(
+fn fetchNextVisibleHead(
     allocator: std.mem.Allocator,
     prefix_scratch: *std.ArrayList(art.ScanEntry),
     shard: *const runtime_shard.Shard,
@@ -207,18 +207,18 @@ fn fetch_next_visible_head(
 
     while (true) {
         const borrowed_entry = switch (query) {
-            .prefix => |prefix| try fetch_one_prefix_entry(allocator, prefix_scratch, shard, prefix, resume_after),
-            .range => |range| try fetch_one_range_entry(shard, range, resume_after),
+            .prefix => |prefix| try fetchOnePrefixEntry(allocator, prefix_scratch, shard, prefix, resume_after),
+            .range => |range| try fetchOneRangeEntry(shard, range, resume_after),
         } orelse return null;
 
-        if (!expiration.key_is_visible_unlocked(shard, borrowed_entry.key, now)) {
+        if (!expiration.keyIsVisibleUnlocked(shard, borrowed_entry.key, now)) {
             resume_after = borrowed_entry.key;
             continue;
         }
 
         return .{
             .shard_idx = shard_idx,
-            .entry = try clone_entry(allocator, borrowed_entry.key, borrowed_entry.value),
+            .entry = try cloneEntry(allocator, borrowed_entry.key, borrowed_entry.value),
         };
     }
 }
@@ -226,18 +226,18 @@ fn fetch_next_visible_head(
 /// Transfers ownership of a shard head to the priority queue or frees it on failure.
 ///
 /// Time Complexity: O(log s), where s is shard count.
-fn add_head_or_free(
+fn addHeadOrFree(
     allocator: std.mem.Allocator,
-    heap: *std.PriorityQueue(ShardHead, void, shard_head_order),
+    heap: *std.PriorityQueue(ShardHead, void, shardHeadOrder),
     head: ShardHead,
 ) error_mod.EngineError!void {
     heap.add(head) catch |err| {
-        free_entry(allocator, head.entry);
+        freeEntry(allocator, head.entry);
         return err;
     };
 }
 
-fn merge_page_from_shards(
+fn mergePageFromShards(
     state: *const runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
     query: ScanQuery,
@@ -253,13 +253,13 @@ fn merge_page_from_shards(
     errdefer page.deinit();
 
     if (limit == 0) return page;
-    if (query == .range and range_is_empty(query.range)) return page;
+    if (query == .range and rangeIsEmpty(query.range)) return page;
 
     try page.entries.ensureTotalCapacity(allocator, limit);
 
-    var heap = std.PriorityQueue(ShardHead, void, shard_head_order).init(allocator, {});
+    var heap = std.PriorityQueue(ShardHead, void, shardHeadOrder).init(allocator, {});
     defer {
-        while (heap.removeOrNull()) |head| free_entry(allocator, head.entry);
+        while (heap.removeOrNull()) |head| freeEntry(allocator, head.entry);
         heap.deinit();
     }
 
@@ -268,7 +268,7 @@ fn merge_page_from_shards(
 
     const resume_after_key = if (cursor) |resume_cursor| resume_cursor.resume_key else null;
     for (&state.shards, 0..) |*shard, shard_idx| {
-        const maybe_head = try fetch_next_visible_head(
+        const maybe_head = try fetchNextVisibleHead(
             allocator,
             &prefix_scratch,
             shard,
@@ -277,7 +277,7 @@ fn merge_page_from_shards(
             resume_after_key,
             now,
         );
-        if (maybe_head) |head| try add_head_or_free(allocator, &heap, head);
+        if (maybe_head) |head| try addHeadOrFree(allocator, &heap, head);
     }
 
     var last_emitted_key: ?[]const u8 = null;
@@ -287,7 +287,7 @@ fn merge_page_from_shards(
         page.entries.appendAssumeCapacity(head.entry);
         last_emitted_key = head.entry.key;
 
-        const maybe_refill = try fetch_next_visible_head(
+        const maybe_refill = try fetchNextVisibleHead(
             allocator,
             &prefix_scratch,
             &state.shards[head.shard_idx],
@@ -296,7 +296,7 @@ fn merge_page_from_shards(
             head.entry.key,
             now,
         );
-        if (maybe_refill) |refill| try add_head_or_free(allocator, &heap, refill);
+        if (maybe_refill) |refill| try addHeadOrFree(allocator, &heap, refill);
     }
 
     if (last_emitted_key) |resume_key| {
@@ -308,7 +308,7 @@ fn merge_page_from_shards(
     return page;
 }
 
-fn collect_entries_paginated(
+fn collectEntriesPaginated(
     state: *const runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
     query: ScanQuery,
@@ -316,7 +316,7 @@ fn collect_entries_paginated(
 ) error_mod.EngineError!std.ArrayList(types.ScanEntry) {
     var entries = std.ArrayList(types.ScanEntry).empty;
     errdefer {
-        for (entries.items) |entry| free_entry(allocator, entry);
+        for (entries.items) |entry| freeEntry(allocator, entry);
         entries.deinit(allocator);
     }
 
@@ -326,18 +326,18 @@ fn collect_entries_paginated(
     const PAGE_LIMIT = 4096;
 
     while (true) {
-        var borrow_val = if (cursor) |c| c.as_cursor() else null;
+        var borrow_val = if (cursor) |c| c.asCursor() else null;
         const borrow_cursor = if (borrow_val) |*c| c else null;
-        var page = try merge_page_from_shards(state, allocator, query, borrow_cursor, PAGE_LIMIT, now);
+        var page = try mergePageFromShards(state, allocator, query, borrow_cursor, PAGE_LIMIT, now);
         defer page.deinit();
 
         try entries.ensureUnusedCapacity(allocator, page.entries.items.len);
         for (page.entries.items) |entry| {
-            entries.appendAssumeCapacity(try clone_entry(allocator, entry.key, entry.value));
+            entries.appendAssumeCapacity(try cloneEntry(allocator, entry.key, entry.value));
         }
 
         if (cursor) |*c| c.deinit();
-        cursor = page.take_next_cursor();
+        cursor = page.takeNextCursor();
 
         if (page.entries.items.len < PAGE_LIMIT or cursor == null) break;
     }
@@ -348,14 +348,14 @@ fn collect_entries_paginated(
 /// Advances the iterator until a visible entry is found or the end of the prefix is reached.
 ///
 /// Time Complexity: O(v * k), where v is version skips and k is key length.
-fn next_visible_from_iterator(
+fn nextVisibleFromIterator(
     it: *art.Iterator,
     shard: *const runtime_shard.Shard,
     now: i64,
 ) error_mod.EngineError!?art.ScanEntry {
     while (true) {
         const entry = (try it.next()) orelse return null;
-        if (!expiration.key_is_visible_unlocked(shard, entry.key, now)) continue;
+        if (!expiration.keyIsVisibleUnlocked(shard, entry.key, now)) continue;
         return entry;
     }
 }
@@ -386,7 +386,7 @@ const PrefixShardIteratorMergeState = struct {
 
         for (&state.shards, 0..) |*shard, shard_idx| {
             self.iterators[shard_idx] = try art.Iterator.init(allocator, &shard.tree, prefix, null);
-            if (try next_visible_from_iterator(&self.iterators[shard_idx], shard, now)) |entry| {
+            if (try nextVisibleFromIterator(&self.iterators[shard_idx], shard, now)) |entry| {
                 self.heap.add(.{ .shard_idx = @intCast(shard_idx), .entry = entry });
             }
         }
@@ -410,20 +410,20 @@ const PrefixShardIteratorMergeState = struct {
     /// Time Complexity: O(k + log s), where k is cloned entry size and s is shard count.
     ///
     /// Allocator: Allocates the returned owned entry through `allocator`.
-    fn next_owned_entry(
+    fn nextOwnedEntry(
         self: *@This(),
         allocator: std.mem.Allocator,
     ) error_mod.EngineError!?types.ScanEntry {
         if (self.heap.len == 0) return null;
         const head = self.heap.items[0];
-        const owned_entry = try clone_entry(allocator, head.entry.key, head.entry.value);
+        const owned_entry = try cloneEntry(allocator, head.entry.key, head.entry.value);
 
         const shard_idx = head.shard_idx;
-        if (try next_visible_from_iterator(&self.iterators[shard_idx], &self.state.shards[shard_idx], self.now)) |next_entry| {
+        if (try nextVisibleFromIterator(&self.iterators[shard_idx], &self.state.shards[shard_idx], self.now)) |next_entry| {
             self.heap.items[0] = .{ .shard_idx = shard_idx, .entry = next_entry };
-            self.heap.sift_down(0);
+            self.heap.siftDown(0);
         } else {
-            _ = self.heap.remove_min();
+            _ = self.heap.removeMin();
         }
 
         return owned_entry;
@@ -435,7 +435,7 @@ const PrefixShardIteratorMergeState = struct {
 /// Time Complexity: O(s + m log s + v), where s is shard count, m is matched entries, and v is total cloned size.
 ///
 /// Allocator: Allocates merge state and result entries through `allocator`.
-fn materialize_prefix_from_shard_iterator(
+fn materializePrefixFromShardIterator(
     state: *const runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
     prefix: []const u8,
@@ -455,7 +455,7 @@ fn materialize_prefix_from_shard_iterator(
     );
     defer merge_state.deinit(allocator);
 
-    while (try merge_state.next_owned_entry(allocator)) |entry| {
+    while (try merge_state.nextOwnedEntry(allocator)) |entry| {
         try result.entries.append(allocator, entry);
     }
 
@@ -465,8 +465,8 @@ fn materialize_prefix_from_shard_iterator(
 /// Resolves the database runtime state from a generic ReadView.
 ///
 /// Time Complexity: O(1).
-fn runtime_state_from_view(view: *const types.ReadView) error_mod.EngineError!*const runtime_state.DatabaseState {
-    const opaque_state = view.resolve_runtime_state() orelse return error.InvalidReadView;
+fn runtimeStateFromView(view: *const types.ReadView) error_mod.EngineError!*const runtime_state.DatabaseState {
+    const opaque_state = view.resolveRuntimeState() orelse return error.InvalidReadView;
     return @ptrCast(@alignCast(opaque_state));
 }
 
@@ -479,18 +479,18 @@ fn runtime_state_from_view(view: *const types.ReadView) error_mod.EngineError!*c
 /// Ownership: Returns a caller-owned `ScanResult`. The caller must later call `deinit` with the same allocator.
 ///
 /// Thread Safety: Acquires the shared side of the global visibility gate, then takes one shard-shared lock at a time while collecting visible ART entries.
-pub fn scan_prefix(
+pub fn scanPrefix(
     state: *const runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
     prefix: []const u8,
 ) error_mod.EngineError!types.ScanResult {
-    state.lock_all_shards_shared();
+    state.lockAllShardsShared();
     
-    defer state.unlock_all_shards_shared();
-    const now = runtime_shard.unix_now();
-    state.record_operation(.scan, 1);
+    defer state.unlockAllShardsShared();
+    const now = runtime_shard.unixNow();
+    state.recordOperation(.scan, 1);
 
-    return materialize_prefix_from_shard_iterator(state, allocator, prefix, now);
+    return materializePrefixFromShardIterator(state, allocator, prefix, now);
 }
 
 /// Scans all currently visible keys inside one inclusive-start, exclusive-end range.
@@ -502,18 +502,18 @@ pub fn scan_prefix(
 /// Ownership: Returns a caller-owned `ScanResult`. The caller must later call `deinit` with the same allocator.
 ///
 /// Thread Safety: Acquires the shared side of the global visibility gate, then takes one shard-shared lock at a time while collecting visible ART entries.
-pub fn scan_range(
+pub fn scanRange(
     state: *const runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
     range: types.KeyRange,
 ) error_mod.EngineError!types.ScanResult {
-    state.lock_all_shards_shared();
+    state.lockAllShardsShared();
     
-    defer state.unlock_all_shards_shared();
-    const now = runtime_shard.unix_now();
-    state.record_operation(.scan, 1);
+    defer state.unlockAllShardsShared();
+    const now = runtime_shard.unixNow();
+    state.recordOperation(.scan, 1);
 
-    const collected = try collect_entries_paginated(state, allocator, .{ .range = range }, now);
+    const collected = try collectEntriesPaginated(state, allocator, .{ .range = range }, now);
     return .{
         .entries = collected,
         .allocator = allocator,
@@ -530,18 +530,18 @@ pub fn scan_range(
 /// Ownership: `cursor` is borrowed when present and must remain valid for the duration of the call. The returned page owns its entries and may own one continuation cursor.
 ///
 /// Thread Safety: Relies on the caller-owned `ReadView` visibility hold and takes one shard-shared lock at a time while fetching or refilling shard-local ART heads.
-pub fn scan_prefix_from_in_view(
+pub fn scanPrefixFromInView(
     view: *const types.ReadView,
     allocator: std.mem.Allocator,
     prefix: []const u8,
     cursor: ?*const types.ScanCursor,
     limit: usize,
 ) error_mod.EngineError!types.ScanPageResult {
-    const state = try runtime_state_from_view(view);
-    const opened_at_unix_seconds = read_view_mod.resolve_opened_at_unix_seconds(view) orelse return error.InvalidReadView;
-    state.record_operation(.scan, 1);
+    const state = try runtimeStateFromView(view);
+    const opened_at_unix_seconds = read_view_mod.resolveOpenedAtUnixSeconds(view) orelse return error.InvalidReadView;
+    state.recordOperation(.scan, 1);
 
-    return merge_page_from_shards(state, allocator, .{ .prefix = prefix }, cursor, limit, opened_at_unix_seconds);
+    return mergePageFromShards(state, allocator, .{ .prefix = prefix }, cursor, limit, opened_at_unix_seconds);
 }
 
 /// Scans one range page inside a consistent read view.
@@ -553,16 +553,16 @@ pub fn scan_prefix_from_in_view(
 /// Ownership: `cursor` is borrowed when present and must remain valid for the duration of the call. The returned page owns its entries and may own one continuation cursor.
 ///
 /// Thread Safety: Relies on the caller-owned `ReadView` visibility hold and takes one shard-shared lock at a time while fetching or refilling shard-local ART heads.
-pub fn scan_range_from_in_view(
+pub fn scanRangeFromInView(
     view: *const types.ReadView,
     allocator: std.mem.Allocator,
     range: types.KeyRange,
     cursor: ?*const types.ScanCursor,
     limit: usize,
 ) error_mod.EngineError!types.ScanPageResult {
-    const state = try runtime_state_from_view(view);
-    const opened_at_unix_seconds = read_view_mod.resolve_opened_at_unix_seconds(view) orelse return error.InvalidReadView;
-    state.record_operation(.scan, 1);
+    const state = try runtimeStateFromView(view);
+    const opened_at_unix_seconds = read_view_mod.resolveOpenedAtUnixSeconds(view) orelse return error.InvalidReadView;
+    state.recordOperation(.scan, 1);
 
-    return merge_page_from_shards(state, allocator, .{ .range = range }, cursor, limit, opened_at_unix_seconds);
+    return mergePageFromShards(state, allocator, .{ .range = range }, cursor, limit, opened_at_unix_seconds);
 }

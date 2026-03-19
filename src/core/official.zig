@@ -30,17 +30,17 @@ pub const Error = engine_db.EngineError;
 ///
 /// Allocator: Allocates owned entry keys and values plus any continuation cursor through `allocator`.
 ///
-/// Ownership: `cursor` is borrowed when present and must remain valid for the duration of the call. The returned page exposes any continuation cursor through `borrow_next_cursor` and may transfer it into `OwnedScanCursor` through `take_next_cursor`.
+/// Ownership: `cursor` is borrowed when present and must remain valid for the duration of the call. The returned page exposes any continuation cursor through `borrowNextCursor` and may transfer it into `OwnedScanCursor` through `takeNextCursor`.
 ///
 /// Thread Safety: Relies on the caller-owned `ReadView` visibility hold and takes shard shared locks while fetching or refilling shard-local ART heads.
-pub fn scan_prefix_from_in_view(
+pub fn scanPrefixFromInView(
     view: *const ReadView,
     allocator: std.mem.Allocator,
     prefix: []const u8,
     cursor: ?*const types.ScanCursor,
     limit: usize,
 ) Error!types.ScanPageResult {
-    return engine_db.scan_prefix_from_in_view(view, allocator, prefix, cursor, limit);
+    return engine_db.scanPrefixFromInView(view, allocator, prefix, cursor, limit);
 }
 
 
@@ -50,17 +50,17 @@ pub fn scan_prefix_from_in_view(
 ///
 /// Allocator: Allocates owned entry keys and values plus any continuation cursor through `allocator`.
 ///
-/// Ownership: `cursor` is borrowed when present and must remain valid for the duration of the call. The returned page exposes any continuation cursor through `borrow_next_cursor` and may transfer it into `OwnedScanCursor` through `take_next_cursor`.
+/// Ownership: `cursor` is borrowed when present and must remain valid for the duration of the call. The returned page exposes any continuation cursor through `borrowNextCursor` and may transfer it into `OwnedScanCursor` through `takeNextCursor`.
 ///
 /// Thread Safety: Relies on the caller-owned `ReadView` visibility hold and takes shard shared locks while fetching or refilling shard-local ART heads.
-pub fn scan_range_from_in_view(
+pub fn scanRangeFromInView(
     view: *const ReadView,
     allocator: std.mem.Allocator,
     range: types.KeyRange,
     cursor: ?*const types.ScanCursor,
     limit: usize,
 ) Error!types.ScanPageResult {
-    return engine_db.scan_range_from_in_view(view, allocator, range, cursor, limit);
+    return engine_db.scanRangeFromInView(view, allocator, range, cursor, limit);
 }
 
 /// Applies one checked batch under the official advanced contract.
@@ -70,6 +70,6 @@ pub fn scan_range_from_in_view(
 /// Allocator: Uses the engine base allocator for committed values and temporary planner scratch while validating guards and preparing the batch.
 ///
 /// Ownership: Clones all surviving write values into engine-owned storage before making the batch visible.
-pub fn apply_checked_batch(db: *Database, batch: CheckedBatch) Error!void {
-    return engine_db.apply_checked_batch(db, batch);
+pub fn applyCheckedBatch(db: *Database, batch: CheckedBatch) Error!void {
+    return engine_db.applyCheckedBatch(db, batch);
 }

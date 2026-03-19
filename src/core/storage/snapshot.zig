@@ -22,7 +22,7 @@ const MIN_SNAPSHOT_SIZE: usize = 24;
 /// One borrowed TTL entry collected from a shard for deterministic serialization.
 const BorrowedTtlEntry = struct {
     key: []const u8,
-    expire_at: i64,
+    expireAt: i64,
 };
 
 /// One temporary loaded shard populated before atomic publish into runtime state.
@@ -149,7 +149,7 @@ pub fn write(
     path: []const u8,
     checkpoint_lsn: u64,
 ) !SnapshotWriteResult {
-    return write_snapshot_file(state, allocator, path, checkpoint_lsn, VERSION);
+    return writeSnapshotFile(state, allocator, path, checkpoint_lsn, VERSION);
 }
 
 /// Loads snapshot state from `path` into `state`.
@@ -192,11 +192,11 @@ pub fn load(
     reader.readNoEof(&magic) catch return error.SnapshotCorrupted;
     if (!std.mem.eql(u8, &magic, &MAGIC)) return error.SnapshotCorrupted;
 
-    const version = read_u32_le(reader) catch return error.SnapshotCorrupted;
+    const version = readU32Le(reader) catch return error.SnapshotCorrupted;
     if (version != 1 and version != VERSION) return error.SnapshotCorrupted;
 
-    const checkpoint_lsn = read_u64_le(reader) catch return error.SnapshotCorrupted;
-    const shard_count = read_u32_le(reader) catch return error.SnapshotCorrupted;
+    const checkpoint_lsn = readU64Le(reader) catch return error.SnapshotCorrupted;
+    const shard_count = readU32Le(reader) catch return error.SnapshotCorrupted;
     if (shard_count != state.shards.len) return error.SnapshotCorrupted;
 
     const loaded_shards = try allocator.alloc(LoadedShard, state.shards.len);
@@ -227,34 +227,34 @@ pub fn load(
     defer value_buf.deinit(allocator);
 
     var total_records: usize = 0;
-    const now = runtime_shard.unix_now();
+    const now = runtime_shard.unixNow();
 
     for (0..shard_count) |_| {
-        const shard_idx_u32 = read_u32_le(reader) catch return error.SnapshotCorrupted;
+        const shard_idx_u32 = readU32Le(reader) catch return error.SnapshotCorrupted;
         if (shard_idx_u32 >= state.shards.len) return error.SnapshotCorrupted;
         const shard_idx: usize = @intCast(shard_idx_u32);
         if (seen[shard_idx]) return error.SnapshotCorrupted;
         seen[shard_idx] = true;
 
-        const record_count = read_u32_le(reader) catch return error.SnapshotCorrupted;
+        const record_count = readU32Le(reader) catch return error.SnapshotCorrupted;
         var loaded_shard = &loaded_shards[shard_idx];
         const shard_allocator = loaded_shard.arena.allocator();
 
         for (0..record_count) |_| {
-            const key_len = read_u16_le(reader) catch return error.SnapshotCorrupted;
+            const key_len = readU16Le(reader) catch return error.SnapshotCorrupted;
             if (key_len > codec.MAX_KEY_LEN) return error.SnapshotCorrupted;
 
             const key = try shard_allocator.alloc(u8, key_len);
             reader.readNoEof(key) catch return error.SnapshotCorrupted;
 
-            const value_len = read_u32_le(reader) catch return error.SnapshotCorrupted;
+            const value_len = readU32Le(reader) catch return error.SnapshotCorrupted;
             if (value_len > codec.MAX_VAL_LEN) return error.SnapshotCorrupted;
 
             try value_buf.resize(allocator, value_len);
             reader.readNoEof(value_buf.items) catch return error.SnapshotCorrupted;
 
             var value_stream = std.io.fixedBufferStream(value_buf.items);
-            const decoded = codec.deserialize_value(value_stream.reader(), shard_allocator, 0) catch return error.SnapshotCorrupted;
+            const decoded = codec.deserializeValue(value_stream.reader(), shard_allocator, 0) catch return error.SnapshotCorrupted;
             if (value_stream.pos != value_buf.items.len) return error.SnapshotCorrupted;
             if (loaded_shard.tree.lookup(key) != null) return error.SnapshotCorrupted;
 
@@ -265,17 +265,17 @@ pub fn load(
         }
 
         if (version >= 2) {
-            const ttl_count = read_u32_le(reader) catch return error.SnapshotCorrupted;
+            const ttl_count = readU32Le(reader) catch return error.SnapshotCorrupted;
             for (0..ttl_count) |_| {
-                const key_len = read_u16_le(reader) catch return error.SnapshotCorrupted;
+                const key_len = readU16Le(reader) catch return error.SnapshotCorrupted;
                 if (key_len > codec.MAX_KEY_LEN) return error.SnapshotCorrupted;
 
                 const key = try allocator.alloc(u8, key_len);
                 defer allocator.free(key);
                 reader.readNoEof(key) catch return error.SnapshotCorrupted;
 
-                const expire_at: i64 = @bitCast(read_u64_le(reader) catch return error.SnapshotCorrupted);
-                if (expire_at <= now) {
+                const expireAt: i64 = @bitCast(readU64Le(reader) catch return error.SnapshotCorrupted);
+                if (expireAt <= now) {
                     _ = try loaded_shard.tree.delete(key);
                     continue;
                 }
@@ -284,7 +284,7 @@ pub fn load(
 
                 const owned_ttl_key = try state.base_allocator.dupe(u8, key);
                 errdefer state.base_allocator.free(owned_ttl_key);
-                try loaded_shard.ttl_index.put(state.base_allocator, owned_ttl_key, expire_at);
+                try loaded_shard.ttl_index.put(state.base_allocator, owned_ttl_key, expireAt);
             }
         }
     }
@@ -295,7 +295,7 @@ pub fn load(
         live_shard.lock.lock();
         defer live_shard.lock.unlock();
 
-        live_shard.replace_storage_unlocked(
+        live_shard.replaceStorageUnlocked(
             loaded_shards[index].arena,
             loaded_shards[index].ttl_index,
             loaded_shards[index].tree,
@@ -316,7 +316,7 @@ pub fn load(
 /// Allocator: Uses `allocator` for sorting scratch, temporary serialized values, and the temporary path.
 ///
 /// Thread Safety: Acquires the shared visibility gate plus one shard shared lock at a time. The resulting snapshot fully reflects all mutations with `lsn <= checkpoint_lsn`, while newer mutations may also appear and remain recoverable from retained WAL records.
-fn write_snapshot_file(
+fn writeSnapshotFile(
     state: *runtime_state.DatabaseState,
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -348,7 +348,7 @@ fn write_snapshot_file(
     var total_records: usize = 0;
 
     for (&state.shards, 0..) |*shard, shard_idx| {
-        total_records += try write_one_shard_snapshot(allocator, &writer, &value_buf, shard, shard_idx, version);
+        total_records += try writeOneShardSnapshot(allocator, &writer, &value_buf, shard, shard_idx, version);
     }
 
     var crc_buf: [4]u8 = undefined;
@@ -370,7 +370,7 @@ fn write_snapshot_file(
 /// Allocator: Uses `allocator` for sorted borrowed-entry slices and temporary serialized value bytes.
 ///
 /// Thread Safety: Acquires the shared visibility gate plus this shard's shared lock for the duration of the shard-serialization window, which blocks writers globally during that window.
-fn write_one_shard_snapshot(
+fn writeOneShardSnapshot(
     allocator: std.mem.Allocator,
     writer: *CrcFileWriter,
     value_buf: *std.ArrayList(u8),
@@ -379,14 +379,14 @@ fn write_one_shard_snapshot(
     version: u32,
 ) !usize {
     const live_shard = @constCast(shard);
-    live_shard.visibility_gate.lock_shared();
-    defer live_shard.visibility_gate.unlock_shared();
+    live_shard.visibility_gate.lockShared();
+    defer live_shard.visibility_gate.unlockShared();
     live_shard.lock.lockShared();
     defer live_shard.lock.unlockShared();
 
     try writer.writeU32Le(@intCast(shard_idx));
     var dummy_ctx: u8 = 0;
-    const entry_count = try shard.tree.for_each(&dummy_ctx, noop_visit);
+    const entry_count = try shard.tree.forEach(&dummy_ctx, noopVisit);
     try writer.writeU32Le(@intCast(entry_count));
 
     var write_ctx = EntryWriteCtx{
@@ -394,10 +394,10 @@ fn write_one_shard_snapshot(
         .writer = writer,
         .value_buf = value_buf,
     };
-    _ = try shard.tree.for_each(&write_ctx, write_entry_visit);
+    _ = try shard.tree.forEach(&write_ctx, writeEntryVisit);
 
     if (version >= 2) {
-        const ttl_entries = try collect_sorted_ttl_entries(allocator, shard);
+        const ttl_entries = try collectSortedTtlEntries(allocator, shard);
         defer allocator.free(ttl_entries);
 
         try writer.writeU32Le(@intCast(ttl_entries.len));
@@ -405,14 +405,14 @@ fn write_one_shard_snapshot(
             std.debug.assert(entry.key.len <= codec.MAX_KEY_LEN);
             try writer.writeU16Le(@intCast(entry.key.len));
             try writer.writeAll(entry.key);
-            try writer.writeU64Le(@bitCast(entry.expire_at));
+            try writer.writeU64Le(@bitCast(entry.expireAt));
         }
     }
 
     return entry_count;
 }
 
-fn noop_visit(_: *anyopaque, _: []const u8, _: *const Value) !void {}
+fn noopVisit(_: *anyopaque, _: []const u8, _: *const Value) !void {}
 
 const EntryWriteCtx = struct {
     allocator: std.mem.Allocator,
@@ -420,7 +420,7 @@ const EntryWriteCtx = struct {
     value_buf: *std.ArrayList(u8),
 };
 
-fn write_entry_visit(ctx_ptr: *anyopaque, key: []const u8, value: *const Value) !void {
+fn writeEntryVisit(ctx_ptr: *anyopaque, key: []const u8, value: *const Value) !void {
     const ctx: *EntryWriteCtx = @ptrCast(@alignCast(ctx_ptr));
     std.debug.assert(key.len <= codec.MAX_KEY_LEN);
 
@@ -428,7 +428,7 @@ fn write_entry_visit(ctx_ptr: *anyopaque, key: []const u8, value: *const Value) 
     try ctx.writer.writeAll(key);
 
     ctx.value_buf.clearRetainingCapacity();
-    try codec.serialize_value(ctx.allocator, value, ctx.value_buf, 0);
+    try codec.serializeValue(ctx.allocator, value, ctx.value_buf, 0);
     std.debug.assert(ctx.value_buf.items.len <= codec.MAX_VAL_LEN);
 
     try ctx.writer.writeU32Le(@intCast(ctx.value_buf.items.len));
@@ -442,17 +442,17 @@ fn write_entry_visit(ctx_ptr: *anyopaque, key: []const u8, value: *const Value) 
 /// Allocator: Allocates the returned borrowed-entry slice with `allocator`.
 ///
 /// Ownership: Returned entries borrow shard-owned keys and are valid only while the caller still holds the shard lock.
-fn collect_sorted_ttl_entries(allocator: std.mem.Allocator, shard: *const runtime_shard.Shard) ![]BorrowedTtlEntry {
+fn collectSortedTtlEntries(allocator: std.mem.Allocator, shard: *const runtime_shard.Shard) ![]BorrowedTtlEntry {
     const entries = try allocator.alloc(BorrowedTtlEntry, shard.ttl_index.count());
     var index: usize = 0;
     var iterator = shard.ttl_index.iterator();
     while (iterator.next()) |entry| : (index += 1) {
         entries[index] = .{
             .key = entry.key_ptr.*,
-            .expire_at = entry.value_ptr.*,
+            .expireAt = entry.value_ptr.*,
         };
     }
-    std.mem.sort(BorrowedTtlEntry, entries, {}, borrowed_ttl_less_than);
+    std.mem.sort(BorrowedTtlEntry, entries, {}, borrowedTtlLessThan);
     return entries;
 }
 
@@ -461,7 +461,7 @@ fn collect_sorted_ttl_entries(allocator: std.mem.Allocator, shard: *const runtim
 /// Time Complexity: O(min(a, b)), where `a` and `b` are the compared key lengths.
 ///
 /// Allocator: Does not allocate.
-fn borrowed_ttl_less_than(_: void, left: BorrowedTtlEntry, right: BorrowedTtlEntry) bool {
+fn borrowedTtlLessThan(_: void, left: BorrowedTtlEntry, right: BorrowedTtlEntry) bool {
     return std.mem.lessThan(u8, left.key, right.key);
 }
 
@@ -470,7 +470,7 @@ fn borrowed_ttl_less_than(_: void, left: BorrowedTtlEntry, right: BorrowedTtlEnt
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-fn read_u16_le(reader: anytype) !u16 {
+fn readU16Le(reader: anytype) !u16 {
     var buf: [2]u8 = undefined;
     try reader.readNoEof(&buf);
     return std.mem.readInt(u16, &buf, .little);
@@ -481,7 +481,7 @@ fn read_u16_le(reader: anytype) !u16 {
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-fn read_u32_le(reader: anytype) !u32 {
+fn readU32Le(reader: anytype) !u32 {
     var buf: [4]u8 = undefined;
     try reader.readNoEof(&buf);
     return std.mem.readInt(u32, &buf, .little);
@@ -492,7 +492,7 @@ fn read_u32_le(reader: anytype) !u32 {
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-fn read_u64_le(reader: anytype) !u64 {
+fn readU64Le(reader: anytype) !u64 {
     var buf: [8]u8 = undefined;
     try reader.readNoEof(&buf);
     return std.mem.readInt(u64, &buf, .little);
@@ -503,13 +503,13 @@ fn read_u64_le(reader: anytype) !u64 {
 /// Time Complexity: O(k + v), where `k` is `key.len` and `v` is deep-clone work for `value`.
 ///
 /// Allocator: Uses the target shard arena for the owned key and cloned value.
-fn put_test_value(state: *runtime_state.DatabaseState, key: []const u8, value: Value) !void {
-    const shard_idx = runtime_shard.get_shard_index(key);
+fn putTestValue(state: *runtime_state.DatabaseState, key: []const u8, value: Value) !void {
+    const shard_idx = runtime_shard.getShardIndex(key);
     const shard = &state.shards[shard_idx];
     shard.lock.lock();
     defer shard.lock.unlock();
 
-    shard.rebind_tree_allocator();
+    shard.rebindTreeAllocator();
     const shard_allocator = shard.arena.allocator();
     const value_ptr = try shard_allocator.create(Value);
     value_ptr.* = value;
@@ -521,19 +521,19 @@ fn put_test_value(state: *runtime_state.DatabaseState, key: []const u8, value: V
 /// Time Complexity: O(k), where `k` is `key.len`.
 ///
 /// Allocator: Uses `state.base_allocator` for the owned TTL key and map growth.
-fn put_test_ttl(state: *runtime_state.DatabaseState, key: []const u8, expire_at: i64) !void {
-    const shard_idx = runtime_shard.get_shard_index(key);
+fn putTestTtl(state: *runtime_state.DatabaseState, key: []const u8, expireAt: i64) !void {
+    const shard_idx = runtime_shard.getShardIndex(key);
     const shard = &state.shards[shard_idx];
     shard.lock.lock();
     defer shard.lock.unlock();
 
     const owned_key = try state.base_allocator.dupe(u8, key);
     errdefer state.base_allocator.free(owned_key);
-    try shard.ttl_index.put(state.base_allocator, owned_key, expire_at);
+    try shard.ttl_index.put(state.base_allocator, owned_key, expireAt);
     shard.has_ttl_entries = true;
 }
 
-fn alloc_tmp_path_test(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, basename: []const u8) ![]u8 {
+fn allocTmpPathTest(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, basename: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, basename });
 }
 
@@ -544,7 +544,7 @@ fn alloc_tmp_path_test(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, ba
 /// Allocator: Allocates the returned byte slice with `allocator`.
 ///
 /// Ownership: Caller owns the returned slice.
-fn read_all_test(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+fn readAllTest(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
     const file_size_u64 = try file.getEndPos();
@@ -557,7 +557,7 @@ fn read_all_test(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 /// Time Complexity: O(1).
 ///
 /// Allocator: Does not allocate.
-fn xor_byte_test(path: []const u8, offset: u64, mask: u8) !void {
+fn xorByteTest(path: []const u8, offset: u64, mask: u8) !void {
     const file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
     defer file.close();
 
@@ -576,7 +576,7 @@ fn xor_byte_test(path: []const u8, offset: u64, mask: u8) !void {
 /// Allocator: Does not allocate.
 ///
 /// Ownership: Borrows `payload` for the duration of the rewrite only.
-fn write_snapshot_payload_with_crc_test(path: []const u8, payload: []const u8) !void {
+fn writeSnapshotPayloadWithCrcTest(path: []const u8, payload: []const u8) !void {
     const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
 
@@ -593,17 +593,17 @@ test "snapshot write and load roundtrip values and ttl metadata" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "roundtrip.snapshot");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "roundtrip.snapshot");
     defer testing.allocator.free(path);
 
     var source = runtime_state.DatabaseState.init(testing.allocator, null);
     defer source.deinit();
 
-    try put_test_value(&source, "alpha", .{ .string = "hello" });
-    try put_test_value(&source, "{user:1}:beta", .{ .integer = 7 });
-    try put_test_value(&source, "{user:2}:gamma", .{ .boolean = true });
-    try put_test_ttl(&source, "alpha", runtime_shard.unix_now() + 60);
-    try put_test_ttl(&source, "{user:2}:gamma", runtime_shard.unix_now() - 60);
+    try putTestValue(&source, "alpha", .{ .string = "hello" });
+    try putTestValue(&source, "{user:1}:beta", .{ .integer = 7 });
+    try putTestValue(&source, "{user:2}:gamma", .{ .boolean = true });
+    try putTestTtl(&source, "alpha", runtime_shard.unixNow() + 60);
+    try putTestTtl(&source, "{user:2}:gamma", runtime_shard.unixNow() - 60);
 
     const write_result = try write(&source, testing.allocator, path, 41);
     try testing.expectEqual(@as(u64, 41), write_result.checkpoint_lsn);
@@ -616,11 +616,11 @@ test "snapshot write and load roundtrip values and ttl metadata" {
     try testing.expectEqual(@as(u64, 41), load_result.checkpoint_lsn);
     try testing.expectEqual(@as(usize, 3), load_result.records_loaded);
 
-    try testing.expectEqualStrings("hello", loaded.shards[runtime_shard.get_shard_index("alpha")].tree.lookup("alpha").?.string);
-    try testing.expectEqual(@as(i64, 7), loaded.shards[runtime_shard.get_shard_index("{user:1}:beta")].tree.lookup("{user:1}:beta").?.integer);
-    try testing.expect(loaded.shards[runtime_shard.get_shard_index("{user:2}:gamma")].tree.lookup("{user:2}:gamma") == null);
-    try testing.expectEqual(@as(?i64, source.shards[runtime_shard.get_shard_index("alpha")].ttl_index.get("alpha").?), loaded.shards[runtime_shard.get_shard_index("alpha")].ttl_index.get("alpha"));
-    try testing.expect(loaded.shards[runtime_shard.get_shard_index("{user:2}:gamma")].ttl_index.get("{user:2}:gamma") == null);
+    try testing.expectEqualStrings("hello", loaded.shards[runtime_shard.getShardIndex("alpha")].tree.lookup("alpha").?.string);
+    try testing.expectEqual(@as(i64, 7), loaded.shards[runtime_shard.getShardIndex("{user:1}:beta")].tree.lookup("{user:1}:beta").?.integer);
+    try testing.expect(loaded.shards[runtime_shard.getShardIndex("{user:2}:gamma")].tree.lookup("{user:2}:gamma") == null);
+    try testing.expectEqual(@as(?i64, source.shards[runtime_shard.getShardIndex("alpha")].ttl_index.get("alpha").?), loaded.shards[runtime_shard.getShardIndex("alpha")].ttl_index.get("alpha"));
+    try testing.expect(loaded.shards[runtime_shard.getShardIndex("{user:2}:gamma")].ttl_index.get("{user:2}:gamma") == null);
 }
 
 test "snapshot write is deterministic for the same state" {
@@ -629,26 +629,26 @@ test "snapshot write is deterministic for the same state" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const first_path = try alloc_tmp_path_test(testing.allocator, tmp, "first.snapshot");
+    const first_path = try allocTmpPathTest(testing.allocator, tmp, "first.snapshot");
     defer testing.allocator.free(first_path);
-    const second_path = try alloc_tmp_path_test(testing.allocator, tmp, "second.snapshot");
+    const second_path = try allocTmpPathTest(testing.allocator, tmp, "second.snapshot");
     defer testing.allocator.free(second_path);
 
     var state = runtime_state.DatabaseState.init(testing.allocator, null);
     defer state.deinit();
 
-    try put_test_value(&state, "zeta", .{ .integer = 1 });
-    try put_test_value(&state, "alpha", .{ .integer = 2 });
-    try put_test_value(&state, "{user:3}:beta", .{ .string = "ok" });
-    try put_test_ttl(&state, "zeta", 123);
-    try put_test_ttl(&state, "alpha", 456);
+    try putTestValue(&state, "zeta", .{ .integer = 1 });
+    try putTestValue(&state, "alpha", .{ .integer = 2 });
+    try putTestValue(&state, "{user:3}:beta", .{ .string = "ok" });
+    try putTestTtl(&state, "zeta", 123);
+    try putTestTtl(&state, "alpha", 456);
 
     _ = try write(&state, testing.allocator, first_path, 9);
     _ = try write(&state, testing.allocator, second_path, 9);
 
-    const first_bytes = try read_all_test(testing.allocator, first_path);
+    const first_bytes = try readAllTest(testing.allocator, first_path);
     defer testing.allocator.free(first_bytes);
-    const second_bytes = try read_all_test(testing.allocator, second_path);
+    const second_bytes = try readAllTest(testing.allocator, second_path);
     defer testing.allocator.free(second_bytes);
 
     try testing.expectEqualSlices(u8, first_bytes, second_bytes);
@@ -660,17 +660,17 @@ test "snapshot load supports version 1 files without ttl sections" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "v1.snapshot");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "v1.snapshot");
     defer testing.allocator.free(path);
 
     var source = runtime_state.DatabaseState.init(testing.allocator, null);
     defer source.deinit();
 
-    try put_test_value(&source, "alpha", .{ .integer = 5 });
-    try put_test_value(&source, "beta", .{ .boolean = false });
-    try put_test_ttl(&source, "alpha", 999);
+    try putTestValue(&source, "alpha", .{ .integer = 5 });
+    try putTestValue(&source, "beta", .{ .boolean = false });
+    try putTestTtl(&source, "alpha", 999);
 
-    _ = try write_snapshot_file(&source, testing.allocator, path, 17, 1);
+    _ = try writeSnapshotFile(&source, testing.allocator, path, 17, 1);
 
     var loaded = runtime_state.DatabaseState.init(testing.allocator, null);
     defer loaded.deinit();
@@ -678,9 +678,9 @@ test "snapshot load supports version 1 files without ttl sections" {
     const result = try load(&loaded, testing.allocator, path);
     try testing.expectEqual(@as(u64, 17), result.checkpoint_lsn);
     try testing.expectEqual(@as(usize, 2), result.records_loaded);
-    try testing.expectEqual(@as(i64, 5), loaded.shards[runtime_shard.get_shard_index("alpha")].tree.lookup("alpha").?.integer);
-    try testing.expectEqual(false, loaded.shards[runtime_shard.get_shard_index("beta")].tree.lookup("beta").?.boolean);
-    try testing.expect(loaded.shards[runtime_shard.get_shard_index("alpha")].ttl_index.get("alpha") == null);
+    try testing.expectEqual(@as(i64, 5), loaded.shards[runtime_shard.getShardIndex("alpha")].tree.lookup("alpha").?.integer);
+    try testing.expectEqual(false, loaded.shards[runtime_shard.getShardIndex("beta")].tree.lookup("beta").?.boolean);
+    try testing.expect(loaded.shards[runtime_shard.getShardIndex("alpha")].ttl_index.get("alpha") == null);
 }
 
 test "snapshot load returns file not found for missing files" {
@@ -698,22 +698,22 @@ test "snapshot load rejects bad magic" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "bad-magic.snapshot");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "bad-magic.snapshot");
     defer testing.allocator.free(path);
 
     var state = runtime_state.DatabaseState.init(testing.allocator, null);
     defer state.deinit();
-    try put_test_value(&state, "alpha", .{ .integer = 1 });
+    try putTestValue(&state, "alpha", .{ .integer = 1 });
     _ = try write(&state, testing.allocator, path, 1);
 
-    const bytes = try read_all_test(testing.allocator, path);
+    const bytes = try readAllTest(testing.allocator, path);
     defer testing.allocator.free(bytes);
 
     var payload = std.ArrayList(u8).empty;
     defer payload.deinit(testing.allocator);
     try payload.appendSlice(testing.allocator, bytes[0 .. bytes.len - 4]);
     payload.items[0] ^= 0xff;
-    try write_snapshot_payload_with_crc_test(path, payload.items);
+    try writeSnapshotPayloadWithCrcTest(path, payload.items);
 
     try testing.expectError(error.SnapshotCorrupted, load(&state, testing.allocator, path));
 }
@@ -724,22 +724,22 @@ test "snapshot load rejects bad version" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "bad-version.snapshot");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "bad-version.snapshot");
     defer testing.allocator.free(path);
 
     var state = runtime_state.DatabaseState.init(testing.allocator, null);
     defer state.deinit();
-    try put_test_value(&state, "alpha", .{ .integer = 1 });
+    try putTestValue(&state, "alpha", .{ .integer = 1 });
     _ = try write(&state, testing.allocator, path, 1);
 
-    const bytes = try read_all_test(testing.allocator, path);
+    const bytes = try readAllTest(testing.allocator, path);
     defer testing.allocator.free(bytes);
 
     var payload = std.ArrayList(u8).empty;
     defer payload.deinit(testing.allocator);
     try payload.appendSlice(testing.allocator, bytes[0 .. bytes.len - 4]);
     std.mem.writeInt(u32, @ptrCast(payload.items[4..8]), 99, .little);
-    try write_snapshot_payload_with_crc_test(path, payload.items);
+    try writeSnapshotPayloadWithCrcTest(path, payload.items);
 
     try testing.expectError(error.SnapshotCorrupted, load(&state, testing.allocator, path));
 }
@@ -750,14 +750,14 @@ test "snapshot load rejects bad crc" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "bad-crc.snapshot");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "bad-crc.snapshot");
     defer testing.allocator.free(path);
 
     var state = runtime_state.DatabaseState.init(testing.allocator, null);
     defer state.deinit();
-    try put_test_value(&state, "alpha", .{ .integer = 1 });
+    try putTestValue(&state, "alpha", .{ .integer = 1 });
     _ = try write(&state, testing.allocator, path, 1);
-    try xor_byte_test(path, 8, 0x01);
+    try xorByteTest(path, 8, 0x01);
 
     try testing.expectError(error.SnapshotCorrupted, load(&state, testing.allocator, path));
 }
@@ -768,23 +768,23 @@ test "snapshot load rejects duplicate shard indices and trailing bytes" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dup_path = try alloc_tmp_path_test(testing.allocator, tmp, "duplicate-shard.snapshot");
+    const dup_path = try allocTmpPathTest(testing.allocator, tmp, "duplicate-shard.snapshot");
     defer testing.allocator.free(dup_path);
-    const trailing_path = try alloc_tmp_path_test(testing.allocator, tmp, "trailing.snapshot");
+    const trailing_path = try allocTmpPathTest(testing.allocator, tmp, "trailing.snapshot");
     defer testing.allocator.free(trailing_path);
 
     var state = runtime_state.DatabaseState.init(testing.allocator, null);
     defer state.deinit();
-    try put_test_value(&state, "alpha", .{ .integer = 1 });
-    try put_test_value(&state, "beta", .{ .integer = 2 });
+    try putTestValue(&state, "alpha", .{ .integer = 1 });
+    try putTestValue(&state, "beta", .{ .integer = 2 });
 
     _ = try write(&state, testing.allocator, dup_path, 1);
     _ = try write(&state, testing.allocator, trailing_path, 1);
 
-    const dup_bytes = try read_all_test(testing.allocator, dup_path);
+    const dup_bytes = try readAllTest(testing.allocator, dup_path);
     defer testing.allocator.free(dup_bytes);
 
-    const trailing_bytes = try read_all_test(testing.allocator, trailing_path);
+    const trailing_bytes = try readAllTest(testing.allocator, trailing_path);
     defer testing.allocator.free(trailing_bytes);
 
     var shard_indices = std.ArrayList(usize).empty;
@@ -815,7 +815,7 @@ test "snapshot load rejects duplicate shard indices and trailing bytes" {
         try payload.appendSlice(testing.allocator, dup_bytes[0 .. dup_bytes.len - 4]);
         const first_shard_idx = std.mem.readInt(u32, dup_bytes[shard_indices.items[0]..][0..4], .little);
         std.mem.writeInt(u32, @ptrCast(payload.items[shard_indices.items[1] .. shard_indices.items[1] + 4]), first_shard_idx, .little);
-        try write_snapshot_payload_with_crc_test(dup_path, payload.items);
+        try writeSnapshotPayloadWithCrcTest(dup_path, payload.items);
     }
 
     {
@@ -823,7 +823,7 @@ test "snapshot load rejects duplicate shard indices and trailing bytes" {
         defer payload.deinit(testing.allocator);
         try payload.appendSlice(testing.allocator, trailing_bytes[0 .. trailing_bytes.len - 4]);
         try payload.append(testing.allocator, 'x');
-        try write_snapshot_payload_with_crc_test(trailing_path, payload.items);
+        try writeSnapshotPayloadWithCrcTest(trailing_path, payload.items);
     }
 
     try testing.expectError(error.SnapshotCorrupted, load(&state, testing.allocator, dup_path));
@@ -836,20 +836,20 @@ test "snapshot load rejects malformed lengths and truncated payloads" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const bad_len_path = try alloc_tmp_path_test(testing.allocator, tmp, "bad-len.snapshot");
+    const bad_len_path = try allocTmpPathTest(testing.allocator, tmp, "bad-len.snapshot");
     defer testing.allocator.free(bad_len_path);
-    const truncated_path = try alloc_tmp_path_test(testing.allocator, tmp, "truncated.snapshot");
+    const truncated_path = try allocTmpPathTest(testing.allocator, tmp, "truncated.snapshot");
     defer testing.allocator.free(truncated_path);
 
     var state = runtime_state.DatabaseState.init(testing.allocator, null);
     defer state.deinit();
-    try put_test_value(&state, "alpha", .{ .integer = 1 });
+    try putTestValue(&state, "alpha", .{ .integer = 1 });
 
     _ = try write(&state, testing.allocator, bad_len_path, 1);
     _ = try write(&state, testing.allocator, truncated_path, 1);
 
     {
-        const bytes = try read_all_test(testing.allocator, bad_len_path);
+        const bytes = try readAllTest(testing.allocator, bad_len_path);
         defer testing.allocator.free(bytes);
 
         var payload = std.ArrayList(u8).empty;
@@ -873,7 +873,7 @@ test "snapshot load rejects malformed lengths and truncated payloads" {
             }
         }
 
-        try write_snapshot_payload_with_crc_test(bad_len_path, payload.items);
+        try writeSnapshotPayloadWithCrcTest(bad_len_path, payload.items);
     }
 
     {
@@ -893,15 +893,15 @@ test "snapshot load rejects duplicate value records within one shard" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "duplicate-value.snapshot");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "duplicate-value.snapshot");
     defer testing.allocator.free(path);
 
     var source = runtime_state.DatabaseState.init(testing.allocator, null);
     defer source.deinit();
-    try put_test_value(&source, "alpha", .{ .integer = 1 });
+    try putTestValue(&source, "alpha", .{ .integer = 1 });
     _ = try write(&source, testing.allocator, path, 1);
 
-    const bytes = try read_all_test(testing.allocator, path);
+    const bytes = try readAllTest(testing.allocator, path);
     defer testing.allocator.free(bytes);
 
     var payload = std.ArrayList(u8).empty;
@@ -929,7 +929,7 @@ test "snapshot load rejects duplicate value records within one shard" {
             try rewritten.appendSlice(testing.allocator, payload.items[0..pos]);
             try rewritten.appendSlice(testing.allocator, payload.items[first_record_start .. first_record_start + first_record_len]);
             try rewritten.appendSlice(testing.allocator, payload.items[pos..]);
-            try write_snapshot_payload_with_crc_test(path, rewritten.items);
+            try writeSnapshotPayloadWithCrcTest(path, rewritten.items);
             break;
         }
 
@@ -952,22 +952,22 @@ test "corrupted snapshot does not partially mutate existing state" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "no-partial-mutate.snapshot");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "no-partial-mutate.snapshot");
     defer testing.allocator.free(path);
 
     var source = runtime_state.DatabaseState.init(testing.allocator, null);
     defer source.deinit();
-    try put_test_value(&source, "alpha", .{ .integer = 1 });
+    try putTestValue(&source, "alpha", .{ .integer = 1 });
     _ = try write(&source, testing.allocator, path, 1);
-    try xor_byte_test(path, 10, 0x80);
+    try xorByteTest(path, 10, 0x80);
 
     var target = runtime_state.DatabaseState.init(testing.allocator, null);
     defer target.deinit();
-    try put_test_value(&target, "sentinel", .{ .integer = 99 });
+    try putTestValue(&target, "sentinel", .{ .integer = 99 });
 
     try testing.expectError(error.SnapshotCorrupted, load(&target, testing.allocator, path));
-    try testing.expectEqual(@as(i64, 99), target.shards[runtime_shard.get_shard_index("sentinel")].tree.lookup("sentinel").?.integer);
-    try testing.expect(target.shards[runtime_shard.get_shard_index("alpha")].tree.lookup("alpha") == null);
+    try testing.expectEqual(@as(i64, 99), target.shards[runtime_shard.getShardIndex("sentinel")].tree.lookup("sentinel").?.integer);
+    try testing.expect(target.shards[runtime_shard.getShardIndex("alpha")].tree.lookup("alpha") == null);
 }
 
 test "snapshot load preserves shard lock usability after publishing replacement storage" {
@@ -976,19 +976,19 @@ test "snapshot load preserves shard lock usability after publishing replacement 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "lock-usable.snapshot");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "lock-usable.snapshot");
     defer testing.allocator.free(path);
 
     var source = runtime_state.DatabaseState.init(testing.allocator, null);
     defer source.deinit();
-    try put_test_value(&source, "alpha", .{ .integer = 1 });
+    try putTestValue(&source, "alpha", .{ .integer = 1 });
     _ = try write(&source, testing.allocator, path, 1);
 
     var loaded = runtime_state.DatabaseState.init(testing.allocator, null);
     defer loaded.deinit();
     _ = try load(&loaded, testing.allocator, path);
 
-    const shard = &loaded.shards[runtime_shard.get_shard_index("alpha")];
+    const shard = &loaded.shards[runtime_shard.getShardIndex("alpha")];
 
     shard.lock.lockShared();
     try testing.expectEqual(@as(i64, 1), shard.tree.lookup("alpha").?.integer);
@@ -996,7 +996,7 @@ test "snapshot load preserves shard lock usability after publishing replacement 
 
     shard.lock.lock();
     defer shard.lock.unlock();
-    shard.reset_unlocked();
+    shard.resetUnlocked();
     try testing.expect(shard.tree.lookup("alpha") == null);
 }
 
@@ -1006,21 +1006,21 @@ test "snapshot load ignores ttl entries for missing keys" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "orphan-ttl.snapshot");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "orphan-ttl.snapshot");
     defer testing.allocator.free(path);
 
     var source = runtime_state.DatabaseState.init(testing.allocator, null);
     defer source.deinit();
-    try put_test_value(&source, "alpha", .{ .integer = 1 });
-    try put_test_ttl(&source, "ghost", 1234);
+    try putTestValue(&source, "alpha", .{ .integer = 1 });
+    try putTestTtl(&source, "ghost", 1234);
     _ = try write(&source, testing.allocator, path, 1);
 
     var loaded = runtime_state.DatabaseState.init(testing.allocator, null);
     defer loaded.deinit();
     _ = try load(&loaded, testing.allocator, path);
 
-    try testing.expectEqual(@as(i64, 1), loaded.shards[runtime_shard.get_shard_index("alpha")].tree.lookup("alpha").?.integer);
-    try testing.expect(loaded.shards[runtime_shard.get_shard_index("ghost")].ttl_index.get("ghost") == null);
+    try testing.expectEqual(@as(i64, 1), loaded.shards[runtime_shard.getShardIndex("alpha")].tree.lookup("alpha").?.integer);
+    try testing.expect(loaded.shards[runtime_shard.getShardIndex("ghost")].ttl_index.get("ghost") == null);
 }
 
 test "snapshot load rejects duplicate ttl keys" {
@@ -1029,16 +1029,16 @@ test "snapshot load rejects duplicate ttl keys" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try alloc_tmp_path_test(testing.allocator, tmp, "duplicate-ttl.snapshot");
+    const path = try allocTmpPathTest(testing.allocator, tmp, "duplicate-ttl.snapshot");
     defer testing.allocator.free(path);
 
     var source = runtime_state.DatabaseState.init(testing.allocator, null);
     defer source.deinit();
-    try put_test_value(&source, "alpha", .{ .integer = 1 });
-    try put_test_ttl(&source, "alpha", runtime_shard.unix_now() + 10);
+    try putTestValue(&source, "alpha", .{ .integer = 1 });
+    try putTestTtl(&source, "alpha", runtime_shard.unixNow() + 10);
     _ = try write(&source, testing.allocator, path, 1);
 
-    const bytes = try read_all_test(testing.allocator, path);
+    const bytes = try readAllTest(testing.allocator, path);
     defer testing.allocator.free(bytes);
 
     var payload = std.ArrayList(u8).empty;
@@ -1069,7 +1069,7 @@ test "snapshot load rejects duplicate ttl keys" {
             try rewritten.appendSlice(testing.allocator, payload.items[0 .. pos + ttl_record_len]);
             try rewritten.appendSlice(testing.allocator, payload.items[pos .. pos + ttl_record_len]);
             try rewritten.appendSlice(testing.allocator, payload.items[pos + ttl_record_len ..]);
-            try write_snapshot_payload_with_crc_test(path, rewritten.items);
+            try writeSnapshotPayloadWithCrcTest(path, rewritten.items);
             break;
         }
         for (0..ttl_count) |_| {
