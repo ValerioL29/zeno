@@ -73,6 +73,9 @@ pub const Value = value_mod.Value;
 /// Public request type for plain-key batch writes.
 pub const PutWrite = batch.PutWrite;
 
+/// Owned result container for batch key reads.
+pub const GetManyResult = batch.GetManyResult;
+
 /// Public guarded batch request for official advanced atomic writes.
 pub const CheckedBatch = checked_batch.CheckedBatch;
 

@@ -26,6 +26,8 @@ fn clone_plain_value_no_visibility(
     allocator: std.mem.Allocator,
     key: []const u8,
 ) error_mod.EngineError!?types.Value {
+    _ = state;
+
     while (true) {
         const v1 = shard.seq.load(.acquire);
         if ((v1 & 1) != 0) {
@@ -41,7 +43,6 @@ fn clone_plain_value_no_visibility(
             continue;
         }
 
-        state.record_operation(.get, 1);
         const value_ptr = stored orelse return null;
 
         if (shard.has_ttl_entries) {
@@ -135,7 +136,9 @@ pub fn get(state: *const runtime_state.DatabaseState, allocator: std.mem.Allocat
     const shard_idx = runtime_shard.get_shard_index(key);
     const shard = @constCast(&state.shards[shard_idx]);
 
-    return clone_plain_value_no_visibility(state, shard, allocator, key);
+    const value = try clone_plain_value_no_visibility(state, shard, allocator, key);
+    state.record_operation(.get, 1);
+    return value;
 }
 
 /// Returns whether `key` is present and TTL-visible in the engine.
@@ -157,4 +160,105 @@ pub fn exists(state: *const runtime_state.DatabaseState, key: []const u8) error_
     const found = check_key_exists_no_visibility(state, shard, key);
     state.record_operation(.get, 1);
     return found;
+}
+
+/// Reads multiple keys in a single call, grouping by shard for efficiency.
+///
+/// Uses counting-sort bucketing to route each key to its shard in O(N) total,
+/// then reads each shard exactly once without revisiting keys from other shards.
+///
+/// Time Complexity: O(N + s + v), where `N` is `keys.len`, `s` is the number
+/// of shards (256, fixed), and `v` is the total size of all cloned values.
+/// The seqlock retry cost is bounded by writer contention on each shard, not
+/// by the number of keys.
+///
+/// Allocator: Allocates the result slice, a flat key-order index array of size N,
+/// and all present cloned values through `allocator`.
+///
+/// Ownership: Returns a `GetManyResult` that owns all cloned values. The caller
+/// must call `result.deinit(allocator)` when done.
+///
+/// Thread Safety: Lock-free via the shard seqlock per shard; safe for concurrent
+/// use with point writes and scans.
+pub fn getMany(
+    state: *const runtime_state.DatabaseState,
+    allocator: std.mem.Allocator,
+    keys: []const []const u8,
+) error_mod.EngineError!types.GetManyResult {
+
+    // Validate all keys before allocating anything
+    for (keys) |key| {
+        internal_mutate.validate_key(key) catch |err| switch (err) {
+            error.EmptyKey, error.KeyTooLarge => return error.KeyTooLarge,
+        };
+    }
+
+    const values = allocator.alloc(?types.Value, keys.len) catch return error.OutOfMemory;
+    errdefer allocator.free(values);
+    @memset(values, null);
+
+    if (keys.len == 0) {
+        state.record_operation(.get, 0);
+        return .{ .values = values };
+    }
+
+    // Flat array of original key indices, sorted into buckets per-shard
+    const key_order = allocator.alloc(usize, keys.len) catch return error.OutOfMemory;
+    defer allocator.free(key_order);
+
+    const cloned_indices = allocator.alloc(usize, keys.len) catch return error.OutOfMemory;
+    defer allocator.free(cloned_indices);
+
+    // Track cloned indices for errdefer cleanup
+    var cloned_count: usize = 0;
+    errdefer {
+        for (cloned_indices[0..cloned_count]) |index| {
+            if (values[index]) |*val| val.deinit(allocator);
+        }
+    }
+
+    // Count keys per shard
+    var shard_counts = [_]u32{0} ** runtime_state.NUM_SHARDS;
+    for (keys) |key| {
+        shard_counts[runtime_shard.get_shard_index(key)] += 1;
+    }
+
+    // Prefix sums, bucket start positions
+    var shard_starts = [_]u32{0} ** runtime_state.NUM_SHARDS;
+    var running: u32 = 0;
+    for (0..runtime_state.NUM_SHARDS) |s| {
+        shard_starts[s] = running;
+        running += shard_counts[s];
+    }
+
+    // Fill key_order — place each key's original index into its shard bucket
+    var cursors = shard_starts;
+    for (keys, 0..) |key, i| {
+        const s = runtime_shard.get_shard_index(key);
+        key_order[cursors[s]] = i;
+        cursors[s] += 1;
+    }
+
+    // Process each touched shard exactly once, reading only its keys
+    for (0..runtime_state.NUM_SHARDS) |shard_idx| {
+        if (shard_counts[shard_idx] == 0) continue;
+
+        const shard = @constCast(&state.shards[shard_idx]);
+        const start = shard_starts[shard_idx];
+        const end = start + shard_counts[shard_idx];
+
+        for (key_order[start..end]) |original_idx| {
+            values[original_idx] = try clone_plain_value_no_visibility(
+                state,
+                shard,
+                allocator,
+                keys[original_idx],
+            );
+            cloned_indices[cloned_count] = original_idx;
+            cloned_count += 1;
+        }
+    }
+
+    state.record_operation(.get, @intCast(keys.len));
+    return .{ .values = values };
 }

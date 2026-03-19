@@ -167,6 +167,28 @@ pub const Database = struct {
         return metrics.call_with_latency(&self.state, read.exists, .{ &self.state, key });
     }
 
+    /// Reads multiple keys in a single call and returns one owned result per key.
+    ///
+    /// Time Complexity: O(s_touched * seqlock_overhead + sum(k_i + v_i)), where
+    /// `s_touched` is the number of distinct shards touched, `k_i` is ART lookup
+    /// work, and `v_i` is the cloned value size per present key.
+    ///
+    /// Allocator: Allocates the result slice and all present cloned values through
+    /// `allocator`.
+    ///
+    /// Ownership: Returns a `GetManyResult` whose `values[i]` corresponds to
+    /// `keys[i]`. The caller must call `result.deinit(allocator)` when done.
+    ///
+    /// Thread Safety: Lock-free via the shard seqlock; safe for concurrent use
+    /// with point writes and scans.
+    pub fn getMany(
+        self: *const Database,
+        allocator: std.mem.Allocator,
+        keys: []const []const u8,
+    ) EngineError!types.GetManyResult {
+        return metrics.call_with_latency(&self.state, read.getMany, .{ &self.state, allocator, keys });
+    }
+
     /// Writes one plain key/value pair through the engine contract surface.
     ///
     /// Time Complexity: O(n + k + v), where `n` is `key.len` for shard routing, `k` is ART lookup or insert work, and `v` is cloned value size.
@@ -3470,4 +3492,115 @@ test "delete_prefix on empty database returns zero" {
 
     const deleted = try db.delete_prefix("any:");
     try testing.expectEqual(@as(u64, 0), deleted);
+}
+
+test "get_many returns values at matching indices" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const one = types.Value{ .integer = 1 };
+    const two = types.Value{ .integer = 2 };
+    try db.put("many:a", &one);
+    try db.put("many:b", &two);
+
+    var result = try db.getMany(testing.allocator, &.{ "many:a", "many:b", "many:missing" });
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), result.values.len);
+    try testing.expectEqual(@as(i64, 1), result.values[0].?.integer);
+    try testing.expectEqual(@as(i64, 2), result.values[1].?.integer);
+    try testing.expect(result.values[2] == null);
+}
+
+test "get_many returns null for expired keys" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const value = types.Value{ .integer = 7 };
+    try db.put("many:expired", &value);
+    try set_ttl_for_test(db, "many:expired", runtime_shard.unix_now() - 1);
+
+    var result = try db.getMany(testing.allocator, &.{"many:expired"});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.values[0] == null);
+}
+
+test "get_many empty slice returns empty result" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    var result = try db.getMany(testing.allocator, &.{});
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), result.values.len);
+}
+
+test "get_many rejects invalid keys" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    try testing.expectError(error.KeyTooLarge, db.getMany(testing.allocator, &.{ "valid", "" }));
+}
+
+test "get_many preserves index correspondence across shards" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    // Build keys guaranteed to land on distinct shards.
+    var candidate_storage: [512][16]u8 = undefined;
+    var chosen: [4][]const u8 = undefined;
+    var chosen_count: usize = 0;
+    var seen_shards = [_]bool{false} ** runtime_state.NUM_SHARDS;
+
+    for (0..candidate_storage.len) |i| {
+        const candidate = try std.fmt.bufPrint(&candidate_storage[i], "many:shard:{d:0>3}", .{i});
+        const shard_idx = runtime_shard.get_shard_index(candidate);
+        if (seen_shards[shard_idx]) continue;
+        seen_shards[shard_idx] = true;
+        chosen[chosen_count] = candidate;
+        chosen_count += 1;
+        if (chosen_count == chosen.len) break;
+    }
+    try testing.expectEqual(@as(usize, chosen.len), chosen_count);
+
+    const values = [_]types.Value{
+        .{ .integer = 10 },
+        .{ .integer = 20 },
+        .{ .integer = 30 },
+        .{ .integer = 40 },
+    };
+    for (chosen, values) |key, val| try db.put(key, &val);
+
+    var result = try db.getMany(testing.allocator, chosen[0..chosen_count]);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(chosen_count, result.values.len);
+    for (result.values, values[0..chosen_count]) |got, expected| {
+        try testing.expectEqual(expected.integer, got.?.integer);
+    }
+}
+
+test "get_many latency sampling records one sample per call" {
+    const testing = std.testing;
+
+    const db = try open(testing.allocator, .{
+        .metrics = .{ .mode = .full },
+    });
+    defer db.close() catch unreachable;
+
+    const before = latency_samples_for_test(db);
+    var result = try db.getMany(testing.allocator, &.{ "a", "b", "c" });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(before + 1, latency_samples_for_test(db));
 }
