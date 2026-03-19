@@ -30,6 +30,7 @@ test "package root includes internal art module tests without exporting them" {
     _ = @import("core/index/art/node.zig");
     _ = @import("core/index/art/prepared_insert.zig");
     _ = @import("core/index/art/tree.zig");
+    _ = @import("core/engine/scan_iterator.zig");
     _ = @import("core/types/value.zig");
     _ = @import("core/runtime/shard.zig");
     _ = @import("core/engine/db.zig");

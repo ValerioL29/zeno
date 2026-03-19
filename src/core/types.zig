@@ -7,6 +7,7 @@ const batch = @import("types/batch.zig");
 const checked_batch = @import("types/checked_batch.zig");
 const readView = @import("types/read_view.zig");
 const scan = @import("types/scan.zig");
+const scan_iterator = @import("engine/scan_iterator.zig");
 const storage_wal = @import("storage/wal.zig");
 const value_mod = @import("types/value.zig");
 
@@ -99,6 +100,12 @@ pub const OwnedScanCursor = scan.OwnedScanCursor;
 
 /// Owned result container for one paginated scan page.
 pub const ScanPageResult = scan.ScanPageResult;
+
+/// Query discriminator for lazy prefix and range iterators.
+pub const IteratorQuery = scan_iterator.IteratorQuery;
+
+/// Lazy iterator over a consistent prefix or range scan.
+pub const ScanIterator = scan_iterator.ScanIterator;
 
 /// Consistent read window handle for official advanced reads.
 pub const ReadView = readView.ReadView;

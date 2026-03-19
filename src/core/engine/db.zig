@@ -14,6 +14,7 @@ const metrics = @import("metrics.zig");
 const read = @import("read.zig");
 const runtime_shard = @import("../runtime/shard.zig");
 const scan_ops = @import("scan.zig");
+const scan_iterator_mod = @import("scan_iterator.zig");
 const runtime_state = @import("../runtime/state.zig");
 const storage_snapshot = @import("../storage/snapshot.zig");
 const storage_wal = @import("../storage/wal.zig");
@@ -22,6 +23,7 @@ const write = @import("write.zig");
 
 /// Shared error set for engine contract operations.
 pub const EngineError = error_mod.EngineError;
+pub const ScanIterator = scan_iterator_mod.ScanIterator;
 
 /// Central engine handle for the finalized `zeno-core` contract surface.
 pub const Database = struct {
@@ -410,6 +412,66 @@ pub const Database = struct {
         range: types.KeyRange,
     ) EngineError!types.ScanResult {
         return metrics.callWithLatency(&self.state, scan_ops.scanRange, .{ &self.state, allocator, range });
+    }
+
+    /// Opens a lazy iterator over all keys whose name starts with `prefix`.
+    ///
+    /// Time Complexity: O(1) to open; O(page_size * (k + v)) per internal page fetch.
+    ///
+    /// Allocator: Uses `allocator` for internal page allocation and entry cloning.
+    ///
+    /// Ownership: The caller must call `iterator.deinit()` when done, even if
+    /// `next()` was never called or returned `null`.
+    ///
+    /// Thread Safety: The iterator holds a `ReadView`; do not call `db.close()`
+    /// while any iterator is alive.
+    pub fn scanIterator(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        prefix: []const u8,
+        page_size: ?usize,
+    ) EngineError!types.ScanIterator {
+        const view = try self.readView();
+        return .{
+            .allocator = allocator,
+            .query = .{ .prefix = prefix },
+            .page_size = if (page_size) |ps| (if (ps == 0) types.ScanIterator.default_page_size else ps) else types.ScanIterator.default_page_size,
+            .view = view,
+            .cursor = null,
+            .page = null,
+            .page_pos = 0,
+            .done = false,
+        };
+    }
+
+    /// Opens a lazy iterator over all keys within the given range.
+    ///
+    /// Time Complexity: O(1) to open; O(page_size * (k + v)) per internal page fetch.
+    ///
+    /// Allocator: Uses `allocator` for internal page allocation and entry cloning.
+    ///
+    /// Ownership: The caller must call `iterator.deinit()` when done, even if
+    /// `next()` was never called or returned `null`.
+    ///
+    /// Thread Safety: The iterator holds a `ReadView`; do not call `db.close()`
+    /// while any iterator is alive.
+    pub fn rangeIterator(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        range: types.KeyRange,
+        page_size: ?usize,
+    ) EngineError!types.ScanIterator {
+        const view = try self.readView();
+        return .{
+            .allocator = allocator,
+            .query = .{ .range = range },
+            .page_size = if (page_size) |ps| (if (ps == 0) types.ScanIterator.default_page_size else ps) else types.ScanIterator.default_page_size,
+            .view = view,
+            .cursor = null,
+            .page = null,
+            .page_pos = 0,
+            .done = false,
+        };
     }
 
     /// Applies one plain atomic batch.
@@ -3603,4 +3665,149 @@ test "get_many latency sampling records one sample per call" {
     var result = try db.getMany(testing.allocator, &.{ "a", "b", "c" });
     defer result.deinit(testing.allocator);
     try testing.expectEqual(before + 1, latencySamplesForTest(db));
+}
+
+test "scanIterator yields all prefix keys in order" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const v = types.Value{ .integer = 1 };
+    try db.put("iter:a", &v);
+    try db.put("iter:b", &v);
+    try db.put("iter:c", &v);
+    try db.put("other:x", &v);
+
+    var it = try db.scanIterator(testing.allocator, "iter:", null);
+    defer it.deinit();
+
+    var count: usize = 0;
+    var prev_key_buf: [64]u8 = undefined;
+    var prev_key_len: usize = 0;
+    while (try it.next()) |entry| {
+        if (count > 0) {
+            const prev = prev_key_buf[0..prev_key_len];
+            try testing.expect(std.mem.order(u8, prev, entry.key) == .lt);
+        }
+        // Copy key into our buffer before it may be freed on next page advance.
+        @memcpy(prev_key_buf[0..entry.key.len], entry.key);
+        prev_key_len = entry.key.len;
+        count += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), count);
+}
+
+test "scanIterator with small page_size paginates correctly" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const v = types.Value{ .integer = 1 };
+    for (0..10) |i| {
+        var key_buf: [16]u8 = undefined;
+        const key = try std.fmt.bufPrint(&key_buf, "page:{d:0>3}", .{i});
+        try db.put(key, &v);
+    }
+
+    // page_size = 3 forces multiple internal fetches for 10 entries.
+    var it = try db.scanIterator(testing.allocator, "page:", 3);
+    defer it.deinit();
+
+    var count: usize = 0;
+    while (try it.next()) |_| count += 1;
+    try testing.expectEqual(@as(usize, 10), count);
+}
+
+test "scanIterator returns nothing for empty prefix" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    var it = try db.scanIterator(testing.allocator, "nothing:", null);
+    defer it.deinit();
+
+    try testing.expect(try it.next() == null);
+}
+
+test "scanIterator skips expired keys" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const v = types.Value{ .integer = 1 };
+    try db.put("exp:live", &v);
+    try db.put("exp:dead", &v);
+    try setTtlForTest(db, "exp:dead", runtime_shard.unixNow() - 1);
+
+    var it = try db.scanIterator(testing.allocator, "exp:", null);
+    defer it.deinit();
+
+    var count: usize = 0;
+    while (try it.next()) |_| count += 1;
+    try testing.expectEqual(@as(usize, 1), count);
+}
+
+test "rangeIterator yields keys within inclusive start exclusive end bounds" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const v = types.Value{ .integer = 1 };
+    try db.put("a", &v);
+    try db.put("b", &v);
+    try db.put("c", &v);
+    try db.put("d", &v);
+
+    // Range [b, d) — inclusive start, exclusive end — expects "b" and "c".
+    var it = try db.rangeIterator(testing.allocator, .{ .start = "b", .end = "d" }, null);
+    defer it.deinit();
+
+    // Assert each key within the loop — do NOT store slices, they are borrowed.
+    var count: usize = 0;
+    while (try it.next()) |entry| {
+        switch (count) {
+            0 => try testing.expectEqualStrings("b", entry.key),
+            1 => try testing.expectEqualStrings("c", entry.key),
+            else => try testing.expect(false), // unexpected entry
+        }
+        count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), count);
+}
+
+test "rangeIterator with small page_size paginates correctly" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    const v = types.Value{ .integer = 1 };
+    for (0..8) |i| {
+        var key_buf: [16]u8 = undefined;
+        const key = try std.fmt.bufPrint(&key_buf, "rng:{d:0>3}", .{i});
+        try db.put(key, &v);
+    }
+
+    var it = try db.rangeIterator(testing.allocator, .{ .start = "rng:", .end = "rng:~" }, 3);
+    defer it.deinit();
+
+    var count: usize = 0;
+    while (try it.next()) |_| count += 1;
+    try testing.expectEqual(@as(usize, 8), count);
+}
+
+test "scanIterator deinit is safe after next returned null" {
+    const testing = std.testing;
+
+    const db = try create(testing.allocator);
+    defer db.close() catch unreachable;
+
+    var it = try db.scanIterator(testing.allocator, "safe:", null);
+    try testing.expect(try it.next() == null);
+    it.deinit();
 }
