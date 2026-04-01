@@ -508,6 +508,13 @@ class Tree:
         deleted = self._delete_recursive(self.root, key, 0, None, None)
         if deleted:
             self._size -= 1
+            # If root is now empty, set it to None
+            if (
+                isinstance(self.root, Node4)
+                and self.root.num_children == 0
+                and self.root.header.leaf_value is None
+            ):
+                self.root = None
         return deleted
 
     def _delete_recursive(
@@ -570,6 +577,12 @@ class Tree:
 
         results: List[Tuple[bytes, Value]] = []
 
+        # Handle root being a leaf
+        if isinstance(self.root, Leaf):
+            if self.root.key.startswith(prefix):
+                results.append((self.root.key, self.root.value))
+            return results
+
         # Find the node where prefix ends
         node, depth = self._find_prefix_node(self.root, prefix, 0)
         if node is None:
@@ -585,13 +598,19 @@ class Tree:
         return results
 
     def _find_prefix_node(
-        self, node: Node, prefix: bytes, depth: int
-    ) -> Tuple[Optional[Node], int]:
+        self, node: Union[Node, Leaf], prefix: bytes, depth: int
+    ) -> Tuple[Optional[Union[Node, Leaf]], int]:
         """Find the node where the prefix ends."""
         while True:
             # Check if we've consumed the entire prefix
             if depth >= len(prefix):
                 return node, depth
+
+            # If we hit a leaf, check if it matches
+            if isinstance(node, Leaf):
+                if node.key.startswith(prefix):
+                    return node, depth
+                return None, depth
 
             # Check prefix bytes in node header
             header = node.header
@@ -632,8 +651,15 @@ class Tree:
             node = child
             depth += 1
 
-    def _collect_all(self, node: Node, results: List[Tuple[bytes, Value]]) -> None:
+    def _collect_all(
+        self, node: Union[Node, Leaf], results: List[Tuple[bytes, Value]]
+    ) -> None:
         """Collect all keys under a node."""
+        # Handle leaf directly
+        if isinstance(node, Leaf):
+            results.append((node.key, node.value))
+            return
+
         if node.header.leaf_value is not None:
             leaf = node.header.leaf_value
             results.append((leaf.key, leaf.value))
@@ -689,6 +715,14 @@ class Tree:
             return []
 
         results: List[Tuple[bytes, Value]] = []
+
+        # Handle root being a leaf
+        if isinstance(self.root, Leaf):
+            if start <= self.root.key < end:
+                results.append((self.root.key, self.root.value))
+            results.sort(key=lambda x: x[0])
+            return results
+
         self._scan_range_recursive(self.root, results, start, end)
 
         results.sort(key=lambda x: x[0])
