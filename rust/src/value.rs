@@ -9,19 +9,45 @@
 //! - Bytes
 //! - Array (Vec<Value>)
 //! - Object (HashMap<String, Value>)
+//!
+//! # Examples
+//!
+//! ```
+//! use zeno::Value;
+//!
+//! // Create values
+//! let int_val = Value::int(42);
+//! let string_val = Value::string("hello");
+//!
+//! // Type checking
+//! assert!(int_val.is_int());
+//! assert!(!int_val.is_string());
+//!
+//! // Access values
+//! assert_eq!(int_val.as_int(), Some(42));
+//! assert_eq!(string_val.as_str(), Some("hello"));
+//! ```
 
 use std::collections::HashMap;
 
 /// A value stored in the database.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
+    /// Null value (equivalent to None in Python or null in JSON).
     Null,
+    /// Boolean value.
     Bool(bool),
+    /// 64-bit signed integer.
     Int(i64),
+    /// 64-bit floating point number.
     Float(f64),
+    /// UTF-8 string.
     String(String),
+    /// Byte array.
     Bytes(Vec<u8>),
+    /// Array of values.
     Array(Vec<Value>),
+    /// Object with string keys.
     Object(HashMap<String, Value>),
 }
 

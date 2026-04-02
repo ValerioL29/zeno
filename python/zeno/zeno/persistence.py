@@ -14,6 +14,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from zeno.types import Value
 
 
+class CorruptionError(Exception):
+    """Raised when WAL or snapshot file is corrupted."""
+
+    pass
+
+
 class WalRecord:
     """A single WAL record.
 
@@ -27,6 +33,7 @@ class WalRecord:
 
     PUT = 1
     DELETE = 2
+    HEADER_SIZE = 9  # 1 (type) + 4 (key_len) + 4 (value_len)
 
     def __init__(
         self,
@@ -61,21 +68,42 @@ class WalRecord:
 
         Returns:
             Tuple of (record, bytes_consumed)
+
+        Raises:
+            CorruptionError: If record is corrupted or truncated.
         """
+        if offset + 9 > len(data):
+            raise CorruptionError("Truncated record: cannot read header")
+
         record_type = struct.unpack("<B", data[offset : offset + 1])[0]
         offset += 1
 
         key_len = struct.unpack("<I", data[offset : offset + 4])[0]
         offset += 4
+
+        if key_len > 4096:  # MAX_KEY_LEN
+            raise CorruptionError(f"Key length {key_len} exceeds maximum")
+
+        if offset + key_len + 4 > len(data):
+            raise CorruptionError("Truncated record: cannot read key")
+
         key = data[offset : offset + key_len]
         offset += key_len
 
         value_len = struct.unpack("<I", data[offset : offset + 4])[0]
         offset += 4
 
+        if value_len > 100 * 1024 * 1024:  # 100MB limit for safety
+            raise CorruptionError(f"Value length {value_len} exceeds maximum")
+
         value = None
         if value_len > 0:
-            value = pickle.loads(data[offset : offset + value_len])
+            if offset + value_len > len(data):
+                raise CorruptionError("Truncated record: cannot read value")
+            try:
+                value = pickle.loads(data[offset : offset + value_len])
+            except pickle.UnpicklingError as e:
+                raise CorruptionError(f"Failed to unpickle value: {e}")
             offset += value_len
 
         return cls(record_type, key, value), offset
@@ -88,15 +116,18 @@ class WriteAheadLog:
     allowing recovery after crashes.
     """
 
-    def __init__(self, wal_path: str) -> None:
+    def __init__(self, wal_path: str, sync_on_write: bool = False) -> None:
         """Initialize WAL.
 
         Args:
             wal_path: Path to WAL file
+            sync_on_write: If True, call fsync after each write for durability.
+                          Defaults to False for performance.
         """
         self.wal_path = Path(wal_path)
         self.lsn = 0  # Log Sequence Number
         self._file: Optional[Any] = None
+        self._sync_on_write = sync_on_write
 
     def open(self) -> None:
         """Open WAL file for writing."""
@@ -112,6 +143,15 @@ class WriteAheadLog:
         if self._file:
             self._file.close()
             self._file = None
+
+    def __enter__(self) -> WriteAheadLog:
+        """Context manager entry."""
+        self.open()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Context manager exit."""
+        self.close()
 
     def append_put(self, key: bytes, value: Value) -> int:
         """Append a PUT record to WAL.
@@ -142,11 +182,15 @@ class WriteAheadLog:
         """Append a record to WAL."""
         if self._file is None:
             self.open()
+            if self._file is None:
+                raise RuntimeError("Failed to open WAL file")
 
         data = record.to_bytes()
         self._file.write(data)
         self._file.flush()
-        # os.fsync(self._file.fileno())  # Uncomment for durability
+
+        if self._sync_on_write:
+            os.fsync(self._file.fileno())
 
         start_lsn = self.lsn
         self.lsn += len(data)
@@ -158,6 +202,9 @@ class WriteAheadLog:
 
         Returns:
             List of records in order
+
+        Raises:
+            CorruptionError: If WAL file is corrupted.
         """
         if not self.wal_path.exists():
             return []
@@ -171,10 +218,13 @@ class WriteAheadLog:
             try:
                 record, consumed = WalRecord.from_bytes(data, offset)
                 records.append(record)
-                offset += consumed
-            except (struct.error, pickle.UnpicklingError):
-                # Incomplete or corrupted record, stop here
+                offset = consumed
+            except CorruptionError:
+                # Corrupted record, stop here
                 break
+            except struct.error as e:
+                # Truncated or malformed record
+                raise CorruptionError(f"Malformed record at offset {offset}: {e}")
 
         return records
 
@@ -184,6 +234,11 @@ class WriteAheadLog:
         if self.wal_path.exists():
             self.wal_path.unlink()
         self.lsn = 0
+
+    def sync(self) -> None:
+        """Force sync WAL to disk."""
+        if self._file:
+            os.fsync(self._file.fileno())
 
 
 class Snapshot:
@@ -240,40 +295,89 @@ class Snapshot:
                     f.write(struct.pack("<I", len(value_bytes)))
                     f.write(value_bytes)
 
+            # Sync to disk for durability
+            os.fsync(f.fileno())
+
     def load(self) -> Tuple[List[Dict[bytes, Value]], int]:
         """Load snapshot from file.
 
         Returns:
             Tuple of (shard_data, checkpoint_lsn)
+
+        Raises:
+            CorruptionError: If snapshot file is corrupted.
+            FileNotFoundError: If snapshot file doesn't exist.
         """
         if not self.snapshot_path.exists():
-            return [], 0
+            raise FileNotFoundError(f"Snapshot file not found: {self.snapshot_path}")
 
         with open(self.snapshot_path, "rb") as f:
             # Header
-            magic = f.read(8)
+            magic = f.read(7)
             if magic != self.MAGIC:
-                raise ValueError("Invalid snapshot file")
+                raise CorruptionError(f"Invalid snapshot magic: {magic!r}")
 
-            version = struct.unpack("<I", f.read(4))[0]
+            version_data = f.read(4)
+            if len(version_data) != 4:
+                raise CorruptionError("Truncated snapshot: cannot read version")
+            version = struct.unpack("<I", version_data)[0]
             if version != self.VERSION:
-                raise ValueError(f"Unsupported snapshot version: {version}")
+                raise CorruptionError(f"Unsupported snapshot version: {version}")
 
-            checkpoint_lsn = struct.unpack("<Q", f.read(8))[0]
-            num_shards = struct.unpack("<I", f.read(4))[0]
+            lsn_data = f.read(8)
+            if len(lsn_data) != 8:
+                raise CorruptionError("Truncated snapshot: cannot read LSN")
+            checkpoint_lsn = struct.unpack("<Q", lsn_data)[0]
+
+            num_shards_data = f.read(4)
+            if len(num_shards_data) != 4:
+                raise CorruptionError("Truncated snapshot: cannot read shard count")
+            num_shards = struct.unpack("<I", num_shards_data)[0]
 
             # Shard data
             shard_data = []
-            for _ in range(num_shards):
-                num_keys = struct.unpack("<I", f.read(4))[0]
+            for shard_idx in range(num_shards):
+                num_keys_data = f.read(4)
+                if len(num_keys_data) != 4:
+                    raise CorruptionError(
+                        f"Truncated snapshot: cannot read key count for shard {shard_idx}"
+                    )
+                num_keys = struct.unpack("<I", num_keys_data)[0]
                 shard: Dict[bytes, Value] = {}
 
-                for _ in range(num_keys):
-                    key_len = struct.unpack("<I", f.read(4))[0]
+                for key_idx in range(num_keys):
+                    key_len_data = f.read(4)
+                    if len(key_len_data) != 4:
+                        raise CorruptionError(
+                            f"Truncated snapshot: cannot read key length at shard {shard_idx}, key {key_idx}"
+                        )
+                    key_len = struct.unpack("<I", key_len_data)[0]
+
                     key = f.read(key_len)
-                    value_len = struct.unpack("<I", f.read(4))[0]
+                    if len(key) != key_len:
+                        raise CorruptionError(
+                            f"Truncated snapshot: cannot read key data at shard {shard_idx}, key {key_idx}"
+                        )
+
+                    value_len_data = f.read(4)
+                    if len(value_len_data) != 4:
+                        raise CorruptionError(
+                            f"Truncated snapshot: cannot read value length at shard {shard_idx}, key {key_idx}"
+                        )
+                    value_len = struct.unpack("<I", value_len_data)[0]
+
                     value_bytes = f.read(value_len)
-                    value = pickle.loads(value_bytes)
+                    if len(value_bytes) != value_len:
+                        raise CorruptionError(
+                            f"Truncated snapshot: cannot read value data at shard {shard_idx}, key {key_idx}"
+                        )
+
+                    try:
+                        value = pickle.loads(value_bytes)
+                    except pickle.UnpicklingError as e:
+                        raise CorruptionError(
+                            f"Failed to unpickle value at shard {shard_idx}, key {key_idx}: {e}"
+                        )
                     shard[key] = value
 
                 shard_data.append(shard)
