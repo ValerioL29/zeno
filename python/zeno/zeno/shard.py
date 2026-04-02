@@ -34,7 +34,12 @@ class Shard:
 
         Args:
             shard_idx: Index of this shard (0-255)
+
+        Raises:
+            ValueError: If shard_idx is out of range.
         """
+        if not 0 <= shard_idx <= 255:
+            raise ValueError(f"shard_idx must be in range [0, 255], got {shard_idx}")
         self.shard_idx: int = shard_idx
         self._tree: Tree = Tree()
         self._lock: anyio.Lock = anyio.Lock()
@@ -52,16 +57,20 @@ class Shard:
             Value if found and not expired, None otherwise
         """
         async with self._lock:
-            # Check TTL
-            if key in self._ttl_index:
-                if time.time() > self._ttl_index[key]:
-                    # Expired
-                    self._tree.delete(key)
-                    del self._ttl_index[key]
-                    return None
+            return await self._get_unlocked(key)
 
-            value = self._tree.lookup(key)
-            return value.clone() if value is not None else None
+    async def _get_unlocked(self, key: bytes) -> Optional[Value]:
+        """Get value without acquiring lock (internal use only)."""
+        # Check TTL
+        if key in self._ttl_index:
+            if time.time() > self._ttl_index[key]:
+                # Expired
+                self._tree.delete(key)
+                del self._ttl_index[key]
+                return None
+
+        value = self._tree.lookup(key)
+        return value.clone() if value is not None else None
 
     async def put(self, key: bytes, value: Value) -> None:
         """Insert or update key-value pair.
@@ -75,8 +84,7 @@ class Shard:
         async with self._lock:
             self._tree.insert(key, value.clone())
             # Clear any existing TTL
-            if key in self._ttl_index:
-                del self._ttl_index[key]
+            self._ttl_index.pop(key, None)
 
     async def delete(self, key: bytes) -> bool:
         """Delete key from shard.
@@ -91,9 +99,7 @@ class Shard:
         """
         async with self._lock:
             # Clear TTL if exists
-            if key in self._ttl_index:
-                del self._ttl_index[key]
-
+            self._ttl_index.pop(key, None)
             return self._tree.delete(key)
 
     async def exists(self, key: bytes) -> bool:
@@ -131,20 +137,7 @@ class Shard:
         """
         async with self._lock:
             results = self._tree.scan_prefix(prefix)
-
-            # Filter expired keys and clone values
-            current_time = time.time()
-            filtered_results = []
-
-            for key, value in results:
-                if key in self._ttl_index:
-                    if current_time > self._ttl_index[key]:
-                        # Expired, skip
-                        continue
-
-                filtered_results.append((key, value.clone()))
-
-            return filtered_results
+            return self._filter_expired(results)
 
     async def scan_range(self, start: bytes, end: bytes) -> List[Tuple[bytes, Value]]:
         """Scan keys in range [start, end).
@@ -160,20 +153,24 @@ class Shard:
         """
         async with self._lock:
             results = self._tree.scan_range(start, end)
+            return self._filter_expired(results)
 
-            # Filter expired keys and clone values
-            current_time = time.time()
-            filtered_results = []
+    def _filter_expired(
+        self, results: List[Tuple[bytes, Value]]
+    ) -> List[Tuple[bytes, Value]]:
+        """Filter out expired keys from scan results."""
+        current_time = time.time()
+        filtered_results = []
 
-            for key, value in results:
-                if key in self._ttl_index:
-                    if current_time > self._ttl_index[key]:
-                        # Expired, skip
-                        continue
+        for key, value in results:
+            if key in self._ttl_index:
+                if current_time > self._ttl_index[key]:
+                    # Expired, skip
+                    continue
 
-                filtered_results.append((key, value.clone()))
+            filtered_results.append((key, value.clone()))
 
-            return filtered_results
+        return filtered_results
 
     async def expire_at(self, key: bytes, timestamp: float) -> bool:
         """Set expiration time for a key.
@@ -206,7 +203,33 @@ class Shard:
                 return None
 
             remaining = self._ttl_index[key] - time.time()
-            return max(0.0, remaining) if remaining > 0 else None
+            if remaining <= 0:
+                # Expired, clean up
+                self._tree.delete(key)
+                del self._ttl_index[key]
+                return None
+
+            return remaining
+
+    async def cleanup_expired(self) -> int:
+        """Remove all expired keys from the shard.
+
+        Returns:
+            Number of keys removed.
+        """
+        async with self._lock:
+            current_time = time.time()
+            expired_keys = [
+                key
+                for key, timestamp in self._ttl_index.items()
+                if current_time > timestamp
+            ]
+
+            for key in expired_keys:
+                self._tree.delete(key)
+                del self._ttl_index[key]
+
+            return len(expired_keys)
 
     def size(self) -> int:
         """Get number of keys in shard."""

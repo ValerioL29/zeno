@@ -222,6 +222,31 @@ class Database:
         shard = self._get_shard(key_bytes)
         return await shard.ttl(key_bytes)
 
+    async def expire(self, key: KeyType, seconds: float) -> bool:
+        """Set expiration for a key in seconds from now.
+
+        Args:
+            key: Key to expire (str or bytes)
+            seconds: Number of seconds until expiration
+
+        Returns:
+            True if key exists and expiration was set
+        """
+        import time
+
+        return await self.expire_at(key, time.time() + seconds)
+
+    async def cleanup_expired(self) -> int:
+        """Remove all expired keys from all shards.
+
+        Returns:
+            Total number of keys removed.
+        """
+        total = 0
+        for shard in self._shards:
+            total += await shard.cleanup_expired()
+        return total
+
     def size(self) -> int:
         """Get total number of keys in database."""
         return sum(shard.size() for shard in self._shards)
