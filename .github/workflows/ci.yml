@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  # ============================================================================
+  # Python Jobs
+  # ============================================================================
+
+  python-lint:
+    name: Python Lint + Type Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python/zeno
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ruff: lint + format check
+      # No deps needed, runs in seconds
+      - uses: astral-sh/ruff-action@v3
+        with:
+          src: python/zeno
+
+      # Type check with ty (fast, no deps needed)
+      # Falls back to pyright if ty has issues
+      - uses: astral-sh/setup-uv@v5
+      - name: Type check
+        working-directory: python/zeno
+        run: uvx ty check || uvx pyright
+
+  python-test:
+    name: Python Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python/zeno
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Setup uv with Python version management and caching
+      # enable-cache: true caches ~/.cache/uv keyed on uv.lock
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      # Install deps using frozen lockfile (fails if lockfile is stale)
+      # --frozen is the CI-correct behavior
+      - run: uv sync --frozen
+
+      # Run tests
+      # pytest-anyio is already configured in pyproject.toml
+      - run: uv run pytest -v
+
+  # ============================================================================
+  # Rust Jobs
+  # ============================================================================
+
+  rust-fmt:
+    name: Rust Format
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # Zero compilation, finishes in seconds
+      - run: cargo fmt --check
+
+  rust-lint-and-test:
+    name: Rust Lint + Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Cache Rust build artifacts
+      # Keys cache on Cargo.lock, handles target/ directory
+      # PRs can only read cache from main branch, so we trigger on push to main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      # Run clippy BEFORE tests
+      # Clippy compiles everything; test reuses those artifacts
+      # Clippy's artifacts are usable by test, but NOT vice versa
+      - name: Clippy
+        run: cargo clippy --all-features -- -D warnings
+
+      # Run tests (reuses clippy's compiled artifacts)
+      - name: Test
+        run: cargo test --all-features
