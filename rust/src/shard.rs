@@ -1,5 +1,5 @@
 //! Simplified in-memory store for initial Rust implementation.
-//! 
+//!
 //! This is a simplified version that will be replaced by full ART implementation.
 //! For now, it uses HashMap for storage to demonstrate the API.
 
@@ -61,7 +61,7 @@ mod tests {
     async fn test_put_and_get() {
         let shard = Shard::new();
         shard.put(b"key".to_vec(), Value::string("value")).await;
-        
+
         let result = shard.get(b"key").await;
         assert_eq!(result, Some(Value::string("value")));
     }
@@ -70,7 +70,7 @@ mod tests {
     async fn test_delete() {
         let shard = Shard::new();
         shard.put(b"key".to_vec(), Value::int(42)).await;
-        
+
         assert!(shard.delete(b"key").await);
         assert!(!shard.exists(b"key").await);
     }

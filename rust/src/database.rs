@@ -1,7 +1,7 @@
 //! Database with 256-way sharding.
 
-use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use crate::shard::Shard;
 use crate::Value;
@@ -16,10 +16,8 @@ pub struct Database {
 impl Database {
     /// Create a new database.
     pub fn new() -> Self {
-        let shards = (0..NUM_SHARDS)
-            .map(|_| Shard::new())
-            .collect();
-        
+        let shards = (0..NUM_SHARDS).map(|_| Shard::new()).collect();
+
         Self { shards }
     }
 
@@ -71,15 +69,15 @@ mod tests {
     #[tokio::test]
     async fn test_basic_operations() {
         let db = Database::new();
-        
+
         // Test put and get
         db.put(b"key".to_vec(), Value::string("value")).await;
         assert_eq!(db.get(b"key").await, Some(Value::string("value")));
-        
+
         // Test overwrite
         db.put(b"key".to_vec(), Value::int(42)).await;
         assert_eq!(db.get(b"key").await, Some(Value::int(42)));
-        
+
         // Test delete
         assert!(db.delete(b"key").await);
         assert!(!db.exists(b"key").await);
@@ -88,11 +86,12 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_keys() {
         let db = Database::new();
-        
+
         for i in 0..100 {
-            db.put(format!("key_{}", i).into_bytes(), Value::int(i)).await;
+            db.put(format!("key_{}", i).into_bytes(), Value::int(i))
+                .await;
         }
-        
+
         for i in 0..100 {
             let result = db.get(format!("key_{}", i).as_bytes()).await;
             assert_eq!(result, Some(Value::int(i)));

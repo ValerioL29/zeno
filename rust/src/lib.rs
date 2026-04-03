@@ -1,5 +1,5 @@
 //! Zeno KV Store - Rust Implementation
-//! 
+//!
 //! Port of the Zig implementation with:
 //! - Value enum for type-safe storage
 //! - ART (Adaptive Radix Tree) index
