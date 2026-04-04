@@ -3,8 +3,8 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use crate::shard::Shard;
 use crate::Value;
+use crate::shard::Shard;
 
 const NUM_SHARDS: usize = 256;
 

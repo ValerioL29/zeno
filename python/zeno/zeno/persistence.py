@@ -5,7 +5,6 @@ Provides WAL (Write-Ahead Log) and Snapshot functionality for durability.
 
 from __future__ import annotations
 
-import os
 import pickle
 import struct
 from pathlib import Path

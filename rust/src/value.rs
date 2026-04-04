@@ -13,8 +13,9 @@
 use std::collections::HashMap;
 
 /// A value stored in the database.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Value {
+    #[default]
     Null,
     Bool(bool),
     Int(i64),

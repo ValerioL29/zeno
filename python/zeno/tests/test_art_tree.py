@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from zeno.art.tree import Tree
 from zeno.types import Value
 

@@ -16,9 +16,8 @@ of Zig's Value type from the original implementation.
 
 from __future__ import annotations
 
-import copy
 from enum import Enum, auto
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List
 
 
 class ValueType(Enum):
